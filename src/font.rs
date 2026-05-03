@@ -266,7 +266,7 @@ impl Font {
                     if let Some(mapping) = subtable.glyph_index(codepoint) {
                         if let Some(mapping) = NonZeroU16::new(mapping.0) {
                             indices_to_load.insert(mapping.get());
-                            char_to_glyph.insert(unsafe { mem::transmute::<u32, char>(codepoint) }, mapping);
+                            char_to_glyph.insert(unsafe { char::from_u32_unchecked(codepoint) }, mapping);
                         }
                     }
                 })
@@ -504,8 +504,12 @@ impl Font {
     /// 0% coverage of that pixel by the glyph and 255 represents 100% coverage. The vec starts at
     /// the top left corner of the glyph.
     #[inline]
-    pub fn rasterize_config(&self, config: GlyphRasterConfig) -> (Metrics, Vec<u8>) {
-        self.rasterize_indexed(config.glyph_index, config.px)
+    pub fn rasterize_config<'r>(
+        &self,
+        raster: &'r mut Raster,
+        config: GlyphRasterConfig,
+    ) -> (Metrics, impl Iterator<Item = u8> + 'r) {
+        self.rasterize_indexed(raster, config.glyph_index, config.px)
     }
 
     /// Retrieves the layout metrics and rasterized bitmap for the given character. If the
@@ -523,8 +527,13 @@ impl Font {
     /// 0% coverage of that pixel by the glyph and 255 represents 100% coverage. The vec starts at
     /// the top left corner of the glyph.
     #[inline]
-    pub fn rasterize(&self, character: char, px: f32) -> (Metrics, Vec<u8>) {
-        self.rasterize_indexed(self.lookup_glyph_index(character), px)
+    pub fn rasterize<'r>(
+        &self,
+        canvas: &'r mut Raster,
+        character: char,
+        px: f32,
+    ) -> (Metrics, impl Iterator<Item = u8> + 'r) {
+        self.rasterize_indexed(canvas, self.lookup_glyph_index(character), px)
     }
 
     /// Retrieves the layout rasterized bitmap for the given raster config. If the raster config's
@@ -582,16 +591,22 @@ impl Font {
     /// * `Vec<u8>` - Coverage vector for the glyph. Coverage is a linear scale where 0 represents
     /// 0% coverage of that pixel by the glyph and 255 represents 100% coverage. The vec starts at
     /// the top left corner of the glyph.
-    pub fn rasterize_indexed(&self, index: u16, px: f32) -> (Metrics, Vec<u8>) {
+    pub fn rasterize_indexed<'r>(
+        &self,
+        canvas: &'r mut Raster,
+        index: u16,
+        px: f32,
+    ) -> (Metrics, impl Iterator<Item = u8> + 'r) {
         if px <= 0.0 {
-            return (Metrics::default(), Vec::new());
+            canvas.resize(0, 0);
+            return (Metrics::default(), canvas.get_bitmap_iter());
         }
         let glyph = &self.glyphs[index as usize];
         let scale = self.scale_factor(px);
         let (metrics, offset_x, offset_y) = self.metrics_raw(scale, glyph, 0.0);
-        let mut canvas = Raster::new(metrics.width, metrics.height);
+        canvas.resize(metrics.width, metrics.height);
         canvas.draw(&glyph, scale, scale, offset_x, offset_y);
-        (metrics, canvas.get_bitmap())
+        (metrics, canvas.get_bitmap_iter())
     }
 
     /// Retrieves the layout metrics and rasterized bitmap at the given index. You normally want to

@@ -17,11 +17,10 @@ mod tests {
 
     #[test]
     fn platform_ceil_test() {
-        use core::mem::transmute;
         let mut y = 3.0;
         while y < 9.0 {
             assert_eq!(ceil(y), f32::ceil(y));
-            y = unsafe { transmute::<u32, f32>(transmute::<f32, u32>(y) + 1) };
+            y = f32::from_bits(f32::to_bits(y) + 1);
         }
 
         assert_eq!(ceil(-1.5), -1.0);
@@ -35,11 +34,10 @@ mod tests {
 
     #[test]
     fn platform_floor_test() {
-        use core::mem::transmute;
         let mut y = -3.0;
         while y > -9.0 {
             assert_eq!(ceil(y), f32::ceil(y));
-            y = unsafe { transmute::<u32, f32>(transmute::<f32, u32>(y) + 1) };
+            y = f32::from_bits(f32::to_bits(y) + 1);
         }
 
         assert_eq!(floor(-1.5), -2.0);

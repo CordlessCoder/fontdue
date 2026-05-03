@@ -556,11 +556,13 @@ impl<'a, U: Copy + Clone> Layout<U> {
     }
 
     /// Gets the currently laid out glyphs.
+    #[inline(always)]
     pub fn glyphs(&'a self) -> &'a Vec<GlyphPosition<U>> {
         &self.output
     }
 
     /// Gets the settings currently being used for layout.
+    #[inline(always)]
     pub fn settings(&self) -> &LayoutSettings {
         &self.settings
     }

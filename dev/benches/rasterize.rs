@@ -2,6 +2,7 @@
 extern crate criterion;
 
 use criterion::{measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion};
+use fontdue::raster::Raster;
 
 type SetupFunction = fn(&mut BenchmarkGroup<WallTime>, &str, &[u8], f32);
 
@@ -69,7 +70,7 @@ fn setup_ab_glyph(group: &mut BenchmarkGroup<WallTime>, font_label: &str, font: 
                     let length = width * height;
                     let mut bitmap = vec![0u8; length];
                     outlined.draw(|x, y, c| {
-                        bitmap[(x as usize) + (y as usize) * width as usize] = (c * 255.0) as u8;
+                        bitmap[(x as usize) + (y as usize) * width] = (c * 255.0) as u8;
                     });
                     len += bitmap.len();
                 }
@@ -89,10 +90,11 @@ fn setup_fontdue(group: &mut BenchmarkGroup<WallTime>, font_label: &str, font: &
     let parameter = format!("fontdue {} {}px", font_label, size);
     group.bench_function(BenchmarkId::from_parameter(parameter), |b| {
         b.iter(|| {
+            let mut canvas = Raster::new(0, 0);
             let mut len = 0;
             for character in MESSAGE.chars() {
-                let (_, bitmap) = font.rasterize(character, size);
-                len += bitmap.len();
+                let (_, bitmap) = font.rasterize(&mut canvas, character, size);
+                len += bitmap.count();
             }
             len
         })

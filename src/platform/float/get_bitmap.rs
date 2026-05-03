@@ -2,7 +2,7 @@ use alloc::vec::*;
 
 #[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
 pub fn get_bitmap(a: &Vec<f32>, length: usize) -> Vec<u8> {
-    use crate::platform::{abs, clamp};
+    use crate::platform::abs;
     use alloc::vec;
     let mut height = 0.0;
     assert!(length <= a.len());
@@ -10,8 +10,7 @@ pub fn get_bitmap(a: &Vec<f32>, length: usize) -> Vec<u8> {
     for i in 0..length {
         unsafe {
             height += a.get_unchecked(i);
-            // Clamping because as u8 is undefined outside of its range in rustc.
-            *(output.get_unchecked_mut(i)) = clamp(abs(height) * 255.9, 0.0, 255.0) as u8;
+            *(output.get_unchecked_mut(i)) = (abs(height) * 255.9) as u8;
         }
     }
     output

@@ -1,5 +1,7 @@
 //! Generates grayscale and unfiltered subpixel RGB output for Fontdue in the terminal.
 
+use fontdue::raster::Raster;
+
 const CHARACTER: char = 'b';
 const SIZE: f32 = 20.0;
 
@@ -19,10 +21,11 @@ pub fn main() {
 }
 
 pub fn print_normal(font: &fontdue::Font) {
-    let (metrics, bitmap) = font.rasterize(CHARACTER, SIZE);
-    for y in 0..metrics.height {
-        for x in 0..metrics.width {
-            let char_s = bitmap[x + y * metrics.width];
+    let mut canvas = Raster::new(0, 0);
+    let (metrics, mut bitmap) = font.rasterize(&mut canvas, CHARACTER, SIZE);
+    for _ in 0..metrics.height {
+        for _ in 0..metrics.width {
+            let char_s = bitmap.next().unwrap();
             print!("\x1B[48;2;{};{};{}m   ", char_s, char_s, char_s);
         }
         println!("\x1B[0m");

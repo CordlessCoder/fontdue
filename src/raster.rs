@@ -7,7 +7,6 @@
 use crate::math::Line;
 use crate::platform::{abs, as_i32, copysign, f32x4, fract};
 use crate::Glyph;
-use alloc::vec;
 use alloc::vec::*;
 
 pub struct Raster {
@@ -17,12 +16,32 @@ pub struct Raster {
 }
 
 impl Raster {
+    #[inline]
+    pub fn empty() -> Self {
+        Raster::new(0, 0)
+    }
+
+    #[inline]
     pub fn new(w: usize, h: usize) -> Raster {
-        Raster {
+        Raster::from_buf(Vec::new(), w, h)
+    }
+
+    #[inline]
+    pub fn from_buf(buf: Vec<f32>, w: usize, h: usize) -> Self {
+        let mut r = Raster {
             w,
             h,
-            a: vec![0.0; w * h + 3],
-        }
+            a: buf,
+        };
+        r.resize(w, h);
+        r
+    }
+
+    pub(crate) fn resize(&mut self, w: usize, h: usize) {
+        self.w = w;
+        self.h = h;
+        self.a.fill(0.0);
+        self.a.resize(w * h + 3, 0.0);
     }
 
     pub(crate) fn draw(&mut self, glyph: &Glyph, scale_x: f32, scale_y: f32, offset_x: f32, offset_y: f32) {
@@ -121,5 +140,13 @@ impl Raster {
     #[inline(always)]
     pub fn get_bitmap(&self) -> Vec<u8> {
         crate::platform::get_bitmap(&self.a, self.w * self.h)
+    }
+
+    #[inline(always)]
+    pub fn get_bitmap_iter<'r>(&'r self) -> impl Iterator<Item = u8> + 'r {
+        self.a.iter().take(self.w * self.h).copied().scan(0.0, |height, v| {
+            *height += v;
+            Some((abs(*height) * 255.9) as u8)
+        })
     }
 }

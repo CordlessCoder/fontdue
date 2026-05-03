@@ -4,6 +4,8 @@
 use std::fs::File;
 use std::io::Write;
 
+use fontdue::raster::Raster;
+
 // Scratch pad for glyphs: ⅞ g ₹
 const CHARACTER: char = '₹';
 const SIZE: f32 = 200.0;
@@ -25,12 +27,13 @@ pub fn generate_fontdue() {
     // Parse it into the font type.
     let font = fontdue::Font::from_bytes(font, settings).unwrap();
     // Rasterize and get the layout metrics for the character at a size.
-    let (metrics, bitmap) = font.rasterize(CHARACTER, SIZE);
+    let mut canvas = Raster::empty();
+    let (metrics, bitmap) = font.rasterize(&mut canvas, CHARACTER, SIZE);
 
     // Output
     let mut o = File::create("fontdue.pgm").unwrap();
     let _ = o.write(format!("P5\n{} {}\n255\n", metrics.width, metrics.height).as_bytes());
-    let _ = o.write(&bitmap);
+    let _ = o.write(&bitmap.collect::<Vec<u8>>());
 }
 
 pub fn generate_rusttype() {

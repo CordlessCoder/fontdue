@@ -1,4 +1,4 @@
-use fontdue::{Font, FontSettings};
+use fontdue::{raster::Raster, Font, FontSettings};
 
 use crate::modules::FONTS;
 const SIZES: [f32; 3] = [1024.0, 8.0, 2.0];
@@ -37,13 +37,15 @@ fn check_best_guess_rasterization(
 }
 
 fn render_common(sizes: &[f32]) {
+    let mut canvas = Raster::empty();
     for font in &FONTS {
         let font = Font::from_bytes(*font, FontSettings::default()).unwrap();
         println!("Rendering characters for: {:?}", font);
         for character in CHARACTERS.iter().copied() {
             for size in sizes {
+                let (m, b) = font.rasterize(&mut canvas, character, *size);
                 check_best_guess_rasterization(
-                    font.rasterize(character, *size),
+                    (m, b.collect()),
                     character,
                     font.lookup_glyph_index(character),
                 );
@@ -54,11 +56,13 @@ fn render_common(sizes: &[f32]) {
 
 #[test]
 fn render_all_small() {
+    let mut canvas = Raster::empty();
     for font in &FONTS {
         let font = Font::from_bytes(*font, FontSettings::default()).unwrap();
         println!("Rendering characters for: {:?}", font);
         for index in 0..font.glyph_count() {
-            check_best_guess_rasterization(font.rasterize_indexed(index, 8.0), ' ', index);
+            let (m, b) = font.rasterize_indexed(&mut canvas, index, 8.0);
+            check_best_guess_rasterization((m, b.collect()), ' ', index);
         }
     }
 }

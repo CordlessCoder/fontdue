@@ -1,4 +1,4 @@
-use fontdue::{Font, FontSettings};
+use fontdue::{raster::Raster, Font, FontSettings};
 use std::{convert::TryInto, fs, io::Cursor, path::Path};
 use walkdir::WalkDir;
 
@@ -15,7 +15,8 @@ fn record_local_baseline(font: &Font, name: &str, character_index: u16, size: f3
     let testcase_name = format!("{}/{}-{}px.png", name, character_index, size);
     let reference_path = format!("./resources/baselines/reference/characters/{}", testcase_name);
     let local_path = format!("./resources/baselines/local/characters/{}", testcase_name);
-    let (metrics, new_bitmap) = font.rasterize_indexed(character_index, size);
+    let mut canvas = Raster::new(0, 0);
+    let (metrics, new_bitmap) = font.rasterize_indexed(&mut canvas, character_index, size);
     if metrics.width == 0 || metrics.height == 0 {
         // No glyph rendered, assert file does not exist on disk
         if Path::new(&reference_path).exists() {
@@ -38,7 +39,7 @@ fn record_local_baseline(font: &Font, name: &str, character_index: u16, size: f3
     );
     encoder.set_color(png::ColorType::Grayscale);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header().unwrap().write_image_data(&new_bitmap).unwrap();
+    encoder.write_header().unwrap().write_image_data(&new_bitmap.collect::<Vec<u8>>()).unwrap();
     fs::create_dir_all(Path::new(&reference_path).parent()?).ok();
     if !Path::new(&reference_path).exists() || fs::read(reference_path).unwrap() != encoded {
         // only write out local bitmap when it doesn't match (this saves a lot of disk i/o time)
@@ -118,7 +119,7 @@ cargo run --example baseline-accept
 #[test]
 fn baseline_all() {
     clean_local_baselines();
-    for (index, bytes) in (&FONTS).iter().enumerate() {
+    for (index, bytes) in FONTS.iter().enumerate() {
         let name = FONT_NAMES[index];
         let font = Font::from_bytes(*bytes, FontSettings::default()).unwrap();
         for g in 0..font.glyph_count() {

@@ -16,7 +16,7 @@ mod hash;
 pub mod layout;
 mod math;
 mod platform;
-mod raster;
+pub mod raster;
 mod table;
 mod unicode;
 

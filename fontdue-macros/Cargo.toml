@@ -1,0 +1,12 @@
+[package]
+name = "fontdue-macros"
+version = "0.9.3"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+fontdue = { path = "../fontdue/" }
+proc-macro2 = "1.0.106"
+quote = "1.0.45"

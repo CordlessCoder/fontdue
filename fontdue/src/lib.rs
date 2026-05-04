@@ -10,11 +10,14 @@
 
 extern crate alloc;
 
-mod font;
+#[doc(hidden)]
+pub mod font;
+mod fontrepr;
 mod hash;
 /// Tools for laying out strings of text.
 pub mod layout;
-mod math;
+#[doc(hidden)]
+pub mod math;
 mod platform;
 pub mod raster;
 mod table;

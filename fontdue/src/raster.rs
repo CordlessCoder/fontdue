@@ -4,10 +4,11 @@
  * is safe. Please be aware of this.
  */
 
+use crate::GlyphRef;
 use crate::math::Line;
 use crate::platform::{abs, as_i32, copysign, f32x4, fract};
-use crate::Glyph;
 use alloc::vec::*;
+use core::iter::FusedIterator;
 
 pub struct Raster {
     w: usize,
@@ -44,14 +45,21 @@ impl Raster {
         self.a.resize(w * h + 3, 0.0);
     }
 
-    pub(crate) fn draw(&mut self, glyph: &Glyph, scale_x: f32, scale_y: f32, offset_x: f32, offset_y: f32) {
+    pub(crate) fn draw(
+        &mut self,
+        glyph: &GlyphRef<'_>,
+        scale_x: f32,
+        scale_y: f32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
         let params = f32x4::new(1.0 / scale_x, 1.0 / scale_y, scale_x, scale_y);
         let scale = f32x4::new(scale_x, scale_y, scale_x, scale_y);
         let offset = f32x4::new(offset_x, offset_y, offset_x, offset_y);
-        for line in &glyph.v_lines {
+        for line in glyph.v_lines {
             self.v_line(line, line.coords * scale + offset);
         }
-        for line in &glyph.m_lines {
+        for line in glyph.m_lines {
             self.m_line(line, line.coords * scale + offset, line.params * params);
         }
     }
@@ -143,10 +151,40 @@ impl Raster {
     }
 
     #[inline(always)]
-    pub fn get_bitmap_iter<'r>(&'r self) -> impl Iterator<Item = u8> + 'r {
-        self.a.iter().take(self.w * self.h).copied().scan(0.0, |height, v| {
-            *height += v;
-            Some((abs(*height) * 255.9) as u8)
-        })
+    pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
+        BitmapIter {
+            inner: self.a.iter().take(self.w * self.h),
+            height: 0.0,
+        }
+        // .copied().scan(0.0, |height, v| {
+        //     *height += v;
+        //     Some((abs(*height) * 255.9) as u8)
+        // })
+    }
+}
+
+pub struct BitmapIter<'r> {
+    inner: core::iter::Take<core::slice::Iter<'r, f32>>,
+    height: f32,
+}
+
+impl Iterator for BitmapIter<'_> {
+    type Item = u8;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        let v = *self.inner.next()?;
+        self.height += v;
+        Some((abs(self.height) * 255.9) as u8)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl FusedIterator for BitmapIter<'_> {}
+impl ExactSizeIterator for BitmapIter<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }

@@ -1,4 +1,5 @@
-use crate::platform::{self, abs, atan2, f32x4, sqrt};
+pub use crate::platform::f32x4;
+use crate::platform::{self, abs, atan2, sqrt};
 use crate::{Glyph, OutlineBounds};
 use alloc::vec;
 use alloc::vec::*;
@@ -415,10 +416,10 @@ impl Geometry {
             v_lines: Vec::new(),
             m_lines: Vec::new(),
             effective_bounds: AABB {
-                xmin: core::f32::MAX,
-                xmax: core::f32::MIN,
-                ymin: core::f32::MAX,
-                ymax: core::f32::MIN,
+                xmin: f32::MAX,
+                xmax: f32::MIN,
+                ymin: f32::MAX,
+                ymax: f32::MIN,
             },
             start_point: Point::default(),
             previous_point: Point::default(),

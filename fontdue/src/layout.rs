@@ -1,13 +1,12 @@
 pub use crate::unicode::CharacterData;
 
-use crate::unicode::{read_utf8, LinebreakData, Linebreaker, LINEBREAK_NONE};
-use crate::Font;
+use crate::FontRepr;
+use crate::unicode::{LINEBREAK_NONE, LinebreakData, Linebreaker, read_utf8};
 use crate::{
-    platform::{ceil, floor},
     Metrics,
+    platform::{ceil, floor},
 };
 use alloc::vec::*;
-use core::borrow::Borrow;
 use core::hash::{Hash, Hasher};
 
 /// Horizontal alignment options for text when a max_width is provided.
@@ -417,13 +416,13 @@ impl<'a, U: Copy + Clone> Layout<U> {
     /// Characters from the input string can only be omitted from the output, they are never
     /// reordered. The output buffer will always contain characters in the order they were defined
     /// in the styles.
-    pub fn append<T: Borrow<Font>>(&mut self, fonts: &[T], style: &TextStyle<U>) {
+    pub fn append(&mut self, fonts: &[&dyn FontRepr], style: &TextStyle<U>) {
         // The first layout pass requires some text.
         if style.text.is_empty() {
             return;
         }
 
-        let font: &Font = &fonts[style.font_index].borrow();
+        let font = fonts[style.font_index];
 
         if let Some(metrics) = font.horizontal_line_metrics(style.px) {
             self.current_ascent = ceil(metrics.ascent);

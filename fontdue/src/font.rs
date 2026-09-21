@@ -299,6 +299,11 @@ const MAX_DIMENSION: f32 = 2147483520.0;
 /// `px`, none of which have a meaningful raster.
 #[doc(hidden)]
 pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f32, f32) {
+    metrics_raw_stretched(scale, glyph, offset, 1.0)
+}
+
+#[inline(always)]
+fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch: f32) -> (Metrics, f32, f32) {
     let bounds = glyph.bounds.scale(scale);
     let mut offset_x = fract(bounds.xmin + offset);
     let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
@@ -312,6 +317,7 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
     let ymin = floor(bounds.ymin);
     let width = ceil(bounds.width + offset_x);
     let height = ceil(bounds.height + offset_y);
+    let stretched_width = width * stretch;
     // `as_i32` saturates, and every later stage trusts the dimensions it produces: `resize` sizes
     // the buffer from them and `add` indexes it with `get_unchecked_mut`. A px large enough to
     // saturate the width while the height truncated to zero sized the buffer at three floats and
@@ -321,7 +327,8 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
         (-MAX_DIMENSION..=MAX_DIMENSION).contains(&xmin)
             && (-MAX_DIMENSION..=MAX_DIMENSION).contains(&ymin)
             && (0.0..=MAX_DIMENSION).contains(&width)
-            && (0.0..=MAX_DIMENSION).contains(&height),
+            && (0.0..=MAX_DIMENSION).contains(&height)
+            && (0.0..=MAX_DIMENSION).contains(&stretched_width),
         "px out of range: this glyph at scale {scale} does not fit i32"
     );
     let metrics = Metrics {
@@ -338,8 +345,14 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
 
 #[inline(always)]
 pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
-    let (metrics, offset_x, offset_y) = metrics_raw(scale, glyph, 0.0);
-    canvas.resize(metrics.width, metrics.height);
+    let (metrics, offset_x, offset_y) = metrics_raw_stretched(scale, glyph, 0.0, stretch);
+    let raster_width = if stretch == 1.0 {
+        metrics.width
+    } else {
+        assert_eq!(stretch, 3.0, "unsupported raster stretch");
+        metrics.width.checked_mul(3).expect("stretched raster width overflow")
+    };
+    canvas.resize(raster_width, metrics.height);
     canvas.draw(&glyph, scale * stretch, scale, offset_x, offset_y);
     metrics
 }

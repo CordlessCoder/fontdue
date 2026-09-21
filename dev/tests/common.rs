@@ -49,6 +49,18 @@ fn raster_accepts_exact_caller_storage() {
 }
 
 #[test]
+fn subpixel_raster_has_three_columns_per_pixel() {
+    let font = Font::from_bytes(
+        &include_bytes!("../resources/fonts/Roboto-Regular.ttf")[..],
+        FontSettings::default(),
+    )
+    .unwrap();
+    let mut raster = fontdue::raster::Raster::empty();
+    let (metrics, bitmap) = font.rasterize_subpixel(&mut raster, 'A', 32.0);
+    assert_eq!(bitmap.count(), metrics.width * metrics.height * 3);
+}
+
+#[test]
 fn baked_subset_unescapes_the_char_literal() {
     // Trimming the quotes off the literal's source text would put `\`, `u`, `{`, `0`, `b` in the
     // subset and leave the degree sign out.

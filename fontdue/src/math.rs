@@ -237,26 +237,36 @@ impl Point {
 pub struct Line {
     /// X0, Y0, X1, Y1.
     pub coords: f32x4,
+    /// Reciprocal X and Y deltas.
+    pub params: [f32; 2],
 }
+
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
+const _: () = assert!(core::mem::size_of::<Line>() == 32);
+#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+const _: () = assert!(core::mem::size_of::<Line>() == 24);
 
 impl Line {
     pub fn new(start: Point, end: Point) -> Line {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
         Line {
             coords: f32x4::new(start.x, start.y, end.x, end.y),
+            params: [
+                if dx == 0.0 {
+                    core::f32::MAX
+                } else {
+                    1.0 / dx
+                },
+                1.0 / dy,
+            ],
         }
     }
 
     #[inline(always)]
     pub(crate) fn raster_parts(&self) -> (f32x4, f32x4, f32x4) {
         let (x0, y0, x1, y1) = self.coords.copied();
-        let dx = x1 - x0;
-        let dy = y1 - y0;
-        let tdx = if dx == 0.0 {
-            core::f32::MAX
-        } else {
-            1.0 / dx
-        };
-        let tdy = 1.0 / dy;
+        let [tdx, tdy] = self.params;
         let (x_start_nudge, x_first_adj) = if x1 >= x0 {
             (0, 1.0)
         } else {
@@ -498,7 +508,10 @@ mod tests {
     #[test]
     fn vertical_line_raster_parts_handle_zero_width() {
         let line = Line::new(Point::new(1.0, 0.0), Point::new(1.0, 2.0));
-        assert_eq!(core::mem::size_of::<Line>(), 16);
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
+        assert_eq!(core::mem::size_of::<Line>(), 32);
+        #[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+        assert_eq!(core::mem::size_of::<Line>(), 24);
         let (nudge, adjustment, params) = line.raster_parts();
         let (x_start, y_start, x_end, y_end) = nudge.copied();
         assert_eq!((x_start.to_bits(), y_start.to_bits(), x_end.to_bits(), y_end.to_bits()), (0, 0, 0, 1));

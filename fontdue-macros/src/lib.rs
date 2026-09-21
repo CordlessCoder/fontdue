@@ -39,15 +39,10 @@ fn f32x4_to_tokens(val: &fontdue::math::f32x4) -> proc_macro2::TokenStream {
     }
 }
 fn line_to_tokens(line: &fontdue::math::Line) -> proc_macro2::TokenStream {
-    let fontdue::math::Line {
-        coords,
-        params,
-    } = line;
-    let [coords, params] = [coords, params].map(f32x4_to_tokens);
+    let coords = f32x4_to_tokens(&line.coords);
     quote! {
         ::fontdue::math::Line {
-            coords: #coords,
-            params: #params
+            coords: #coords
         }
     }
 }

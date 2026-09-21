@@ -1,20 +1,20 @@
 mod as_i32;
 mod atan;
 mod atan2;
+mod bitmap;
 mod ceil;
 mod floor;
 mod fract;
-mod get_bitmap;
 mod sqrt;
 mod trunc;
 
 pub use as_i32::*;
 pub use atan::*;
 pub use atan2::*;
+pub use bitmap::*;
 pub use ceil::*;
 pub use floor::*;
 pub use fract::*;
-pub use get_bitmap::*;
 pub use sqrt::*;
 #[allow(unused_imports)]
 pub use trunc::*;

@@ -95,7 +95,9 @@ fn setup_fontdue(group: &mut BenchmarkGroup<WallTime>, font_label: &str, font: &
             let mut len = 0;
             for character in MESSAGE.chars() {
                 let (_, bitmap) = font.rasterize(&mut canvas, character, size);
-                len += bitmap.count();
+                // Collect rather than count: the other implementations here all materialise a
+                // bitmap, and counting a lazy iterator lets the coverage pass be optimised out.
+                len += bitmap.collect::<Vec<u8>>().len();
             }
             len
         })

@@ -24,6 +24,10 @@ png = "0.16"
 walkdir = "2.3"
 
 [[bench]]
+name = "bitmap"
+harness = false
+
+[[bench]]
 name = "rasterize"
 harness = false
 

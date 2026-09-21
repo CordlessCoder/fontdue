@@ -6,7 +6,7 @@
 
 use crate::GlyphRef;
 use crate::math::Line;
-use crate::platform::{abs, as_i32, copysign, f32x4, fract};
+use crate::platform::{abs, as_i32, bitmap_block, copysign, f32x4, fract};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
@@ -146,26 +146,45 @@ impl Raster {
     }
 
     #[inline(always)]
-    pub fn get_bitmap(&self) -> Vec<u8> {
-        crate::platform::get_bitmap(&self.a, self.w * self.h)
-    }
-
-    #[inline(always)]
     pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
         BitmapIter {
-            inner: self.a.iter().take(self.w * self.h),
+            a: &self.a,
+            pos: 0,
+            remaining: self.w * self.h,
             height: 0.0,
+            block: [0; 4],
+            block_pos: BLOCK,
         }
-        // .copied().scan(0.0, |height, v| {
-        //     *height += v;
-        //     Some((abs(*height) * 255.9) as u8)
-        // })
     }
 }
 
+const BLOCK: usize = 4;
+
 pub struct BitmapIter<'r> {
-    inner: core::iter::Take<core::slice::Iter<'r, f32>>,
+    /// Area deltas. `resize` keeps this at `w * h + 3`, and those three slots are what let the
+    /// final block read four floats without running off the end. Shortening the slack breaks this
+    /// iterator before it breaks `Raster::add`.
+    a: &'r [f32],
+    /// Index of the next block of deltas to consume.
+    pos: usize,
+    remaining: usize,
+    /// Running coverage total at `pos`, carried from block to block.
     height: f32,
+    block: [u8; BLOCK],
+    /// Next byte to yield from `block`; `BLOCK` once it is spent.
+    block_pos: usize,
+}
+
+impl BitmapIter<'_> {
+    #[inline(always)]
+    fn refill(&mut self) {
+        let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
+        let (block, height) = bitmap_block(chunk, self.height);
+        self.block = block;
+        self.height = height;
+        self.pos += BLOCK;
+        self.block_pos = 0;
+    }
 }
 
 impl Iterator for BitmapIter<'_> {
@@ -173,18 +192,59 @@ impl Iterator for BitmapIter<'_> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        let v = *self.inner.next()?;
-        self.height += v;
-        Some((abs(self.height) * 255.9) as u8)
+        if self.remaining == 0 {
+            return None;
+        }
+        if self.block_pos == BLOCK {
+            self.refill();
+        }
+        let v = self.block[self.block_pos];
+        self.block_pos += 1;
+        self.remaining -= 1;
+        Some(v)
+    }
+
+    /// Internal iteration, which skips the per-byte buffer bookkeeping `next` has to do. This is
+    /// the path `for_each`, `count` and `sum` take; `collect` does not, since `Vec` extends through
+    /// `next` for iterators that are not `TrustedLen`.
+    fn fold<B, F>(mut self, init: B, mut f: F) -> B
+    where
+        F: FnMut(B, Self::Item) -> B,
+    {
+        let mut acc = init;
+        while self.remaining > 0 && self.block_pos < BLOCK {
+            acc = f(acc, self.block[self.block_pos]);
+            self.block_pos += 1;
+            self.remaining -= 1;
+        }
+        while self.remaining >= BLOCK {
+            let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
+            let (block, height) = bitmap_block(chunk, self.height);
+            self.height = height;
+            self.pos += BLOCK;
+            for v in block {
+                acc = f(acc, v);
+            }
+            self.remaining -= BLOCK;
+        }
+        if self.remaining > 0 {
+            let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
+            let (block, _) = bitmap_block(chunk, self.height);
+            for &v in &block[..self.remaining] {
+                acc = f(acc, v);
+            }
+            self.remaining = 0;
+        }
+        acc
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
+        (self.remaining, Some(self.remaining))
     }
 }
 impl FusedIterator for BitmapIter<'_> {}
 impl ExactSizeIterator for BitmapIter<'_> {
     fn len(&self) -> usize {
-        self.inner.len()
+        self.remaining
     }
 }

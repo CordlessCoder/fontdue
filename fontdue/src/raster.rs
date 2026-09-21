@@ -73,7 +73,10 @@ impl<'a> Raster<'a> {
         self.h = h;
         match &mut self.a {
             RasterBuffer::Owned(a) => {
-                a.fill(0.0);
+                // Clear first, so the refill writes `len` elements and no more. Zeroing before
+                // the resize covers whatever the largest glyph so far grew the buffer to, which
+                // is work every smaller glyph after it pays for nothing.
+                a.clear();
                 a.resize(len, 0.0);
             }
             RasterBuffer::Borrowed(a) => {

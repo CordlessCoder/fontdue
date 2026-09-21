@@ -477,3 +477,36 @@ impl Geometry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ttf_parser::OutlineBuilder;
+
+    #[test]
+    fn empty_and_single_point_contours_have_no_lines() {
+        let empty = Geometry::new(32.0, 1000.0);
+        let mut empty_glyph = Glyph::default();
+        empty.finalize(&mut empty_glyph);
+        assert!(empty_glyph.v_lines.is_empty());
+        assert!(empty_glyph.m_lines.is_empty());
+
+        let mut point = Geometry::new(32.0, 1000.0);
+        point.move_to(10.0, 20.0);
+        point.close();
+        let mut point_glyph = Glyph::default();
+        point.finalize(&mut point_glyph);
+        assert!(point_glyph.v_lines.is_empty());
+        assert!(point_glyph.m_lines.is_empty());
+    }
+
+    #[test]
+    fn vertical_line_raster_parts_handle_zero_width() {
+        let line = Line::new(Point::new(1.0, 0.0), Point::new(1.0, 2.0));
+        let (nudge, adjustment, params) = line.raster_parts();
+        let (x_start, y_start, x_end, y_end) = nudge.copied();
+        assert_eq!((x_start.to_bits(), y_start.to_bits(), x_end.to_bits(), y_end.to_bits()), (0, 0, 0, 1));
+        assert_eq!(adjustment.copied(), (1.0, 1.0, 0.0, 0.0));
+        assert_eq!(params.copied(), (f32::MAX, 0.5, 0.0, 2.0));
+    }
+}

@@ -13,6 +13,7 @@ freetype_benchmark = ["freetype-rs"]
 
 [dependencies]
 fontdue = { path = "../fontdue" }
+fontdue-macros = { path = "../fontdue-macros" }
 
 freetype-rs = { version = "0.26.0", optional = true }
 

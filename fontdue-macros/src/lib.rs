@@ -1,4 +1,5 @@
 // TODO: Support settign font settings
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use fontdue::{FontRepr, LineMetrics, OutlineBounds, font::Glyph};
@@ -40,16 +41,12 @@ fn f32x4_to_tokens(val: &fontdue::math::f32x4) -> proc_macro2::TokenStream {
 fn line_to_tokens(line: &fontdue::math::Line) -> proc_macro2::TokenStream {
     let fontdue::math::Line {
         coords,
-        nudge,
-        adjustment,
         params,
     } = line;
-    let [coords, nudge, adjustment, params] = [coords, nudge, adjustment, params].map(f32x4_to_tokens);
+    let [coords, params] = [coords, params].map(f32x4_to_tokens);
     quote! {
         ::fontdue::math::Line {
             coords: #coords,
-            nudge: #nudge,
-            adjustment: #adjustment,
             params: #params
         }
     }
@@ -116,6 +113,7 @@ fn fontdue_font_from_file_impl(
     let path = source;
     let ttf_data = std::fs::read(path).unwrap();
     let mut settings = fontdue::FontSettings::default();
+    let mut subset_chars = None;
 
     if tokens.clone().next().is_some_and(|t| matches!(t, TokenTree::Punct(punct) if punct.as_char() == ',')) {
         _ = tokens.next();
@@ -123,6 +121,7 @@ fn fontdue_font_from_file_impl(
     loop {
         match tokens.next() {
             None => break,
+            Some(TokenTree::Punct(punct)) if punct.as_char() == ',' => continue,
             Some(TokenTree::Ident(i)) => match i.to_string().as_str() {
                 "scale" => {
                     assert!(matches!(tokens.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':'));
@@ -131,6 +130,15 @@ fn fontdue_font_from_file_impl(
                     };
                     settings.scale = lit.to_string().parse().unwrap();
                 }
+                "chars" => {
+                    assert!(matches!(tokens.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':'));
+                    let TokenTree::Literal(lit) = tokens.next().unwrap() else {
+                        panic!("Expected string literal to follow chars:")
+                    };
+                    let value = lit.to_string();
+                    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap();
+                    subset_chars = Some(value.chars().collect::<Vec<_>>());
+                }
                 _ => unimplemented!(),
             },
             _ => unimplemented!(),
@@ -138,6 +146,20 @@ fn fontdue_font_from_file_impl(
     }
 
     let font = fontdue::Font::from_bytes(ttf_data, settings).unwrap();
+    let glyph_indices = match &subset_chars {
+        None => (0..font.glyph_count()).collect::<Vec<_>>(),
+        Some(chars) => {
+            let mut indices = BTreeSet::from([0u16]);
+            for character in chars {
+                if let Some(index) = font.chars().get(character) {
+                    indices.insert(index.get());
+                }
+            }
+            indices.into_iter().collect()
+        }
+    };
+    let glyph_remap: HashMap<u16, u16> =
+        glyph_indices.iter().enumerate().map(|(new, old)| (*old, new as u16)).collect();
 
     let none = || {
         quote! {
@@ -161,7 +183,14 @@ fn fontdue_font_from_file_impl(
     let horizontal_kern = match font.internal_horizontal_kern_map() {
         None => none(),
         Some(map) => {
-            let arms = map.iter().map(|(k, v)| quote! { #k => ::core::option::Option::Some(#v) });
+            let arms = map.iter().filter_map(|(key, value)| {
+                let left = (*key >> 16) as u16;
+                let right = *key as u16;
+                let left = glyph_remap.get(&left)?;
+                let right = glyph_remap.get(&right)?;
+                let key = (u32::from(*left) << 16) | u32::from(*right);
+                Some(quote! { #key => ::core::option::Option::Some(#value) })
+            });
             quote! {
                 let scale = self.scale_factor(px);
                 let key = u32::from(left) << 16 | u32::from(right);
@@ -173,12 +202,19 @@ fn fontdue_font_from_file_impl(
             }
         }
     };
-    let glyph_lookup_arms = font.chars().iter().map(|(k, v)| {
-        let v = v.get();
-        quote! { #k => #v }
-    });
-    let glyph_count = font.glyph_count();
-    let glyphs = font.internal_glyph_slice().iter().map(glyph_to_tokens);
+    let glyph_lookup_arms = match &subset_chars {
+        None => Box::new(font.chars().iter().filter_map(|(k, v)| {
+            let v = *glyph_remap.get(&v.get())?;
+            Some(quote! { #k => #v })
+        })) as Box<dyn Iterator<Item = _>>,
+        Some(chars) => Box::new(chars.iter().filter_map(|k| {
+            let v = *glyph_remap.get(&font.chars().get(k)?.get())?;
+            Some(quote! { #k => #v })
+        })),
+    };
+    let glyph_count = glyph_indices.len() as u16;
+    let glyphs =
+        glyph_indices.iter().map(|index| glyph_to_tokens(&font.internal_glyph_slice()[*index as usize]));
     quote! {
         #[derive(Clone, Copy)]
         pub struct #type_name;

@@ -1,5 +1,17 @@
 // [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+#[cfg(all(
+    target_arch = "xtensa",
+    not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
+))]
+#[inline(always)]
+pub fn trunc(value: f32) -> f32 {
+    unsafe { value.to_int_unchecked::<i32>() as f32 }
+}
+
+#[cfg(all(
+    not(target_arch = "xtensa"),
+    not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
+))]
 pub fn trunc(x: f32) -> f32 {
     let mut i: u32 = x.to_bits();
     let mut e: i32 = (i >> 23 & 0xff) as i32 - 0x7f + 9;

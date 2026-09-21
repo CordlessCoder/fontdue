@@ -237,43 +237,12 @@ impl Point {
 pub struct Line {
     /// X0, Y0, X1, Y1.
     pub coords: f32x4,
-    /// start_x_nudge, start_y_nudge, end_x_nudge, end_y_nudge.
-    pub nudge: f32x4,
-    /// x_first_adj, y_first_adj, none, none.
-    pub adjustment: f32x4,
-    /// tdx, tdy, dx, dy.
+    /// tdx, tdy, unused, unused.
     pub params: f32x4,
 }
 
 impl Line {
     pub fn new(start: Point, end: Point) -> Line {
-        // Floor adjustment and nudge: 0.0, 0
-        // Ceil adjustment and nudge: 1.0, 1
-        const FLOOR_NUDGE: u32 = 0;
-        const CEIL_NUDGE: u32 = 1;
-
-        let (x_start_nudge, x_first_adj) = if end.x >= start.x {
-            (FLOOR_NUDGE, 1.0)
-        } else {
-            (CEIL_NUDGE, 0.0)
-        };
-        let (y_start_nudge, y_first_adj) = if end.y >= start.y {
-            (FLOOR_NUDGE, 1.0)
-        } else {
-            (CEIL_NUDGE, 0.0)
-        };
-
-        let x_end_nudge = if end.x > start.x {
-            CEIL_NUDGE
-        } else {
-            FLOOR_NUDGE
-        };
-        let y_end_nudge = if end.y > start.y {
-            CEIL_NUDGE
-        } else {
-            FLOOR_NUDGE
-        };
-
         let dx = end.x - start.x;
         let dy = end.y - start.y;
         let tdx = if dx == 0.0 {
@@ -285,10 +254,39 @@ impl Line {
 
         Line {
             coords: f32x4::new(start.x, start.y, end.x, end.y),
-            nudge: f32x4::new_u32(x_start_nudge, y_start_nudge, x_end_nudge, y_end_nudge),
-            adjustment: f32x4::new(x_first_adj, y_first_adj, 0.0, 0.0),
-            params: f32x4::new(tdx, tdy, dx, dy),
+            params: f32x4::new(tdx, tdy, 0.0, 0.0),
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn raster_parts(&self) -> (f32x4, f32x4, f32x4) {
+        let (x0, y0, x1, y1) = self.coords.copied();
+        let (tdx, tdy, _, _) = self.params.copied();
+        let (x_start_nudge, x_first_adj) = if x1 >= x0 {
+            (0, 1.0)
+        } else {
+            (1, 0.0)
+        };
+        let (y_start_nudge, y_first_adj) = if y1 >= y0 {
+            (0, 1.0)
+        } else {
+            (1, 0.0)
+        };
+        let x_end_nudge = if x1 > x0 {
+            1
+        } else {
+            0
+        };
+        let y_end_nudge = if y1 > y0 {
+            1
+        } else {
+            0
+        };
+        (
+            f32x4::new_u32(x_start_nudge, y_start_nudge, x_end_nudge, y_end_nudge),
+            f32x4::new(x_first_adj, y_first_adj, 0.0, 0.0),
+            f32x4::new(tdx, tdy, x1 - x0, y1 - y0),
+        )
     }
 
     fn reposition(&mut self, bounds: AABB, reverse: bool) {

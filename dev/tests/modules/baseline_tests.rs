@@ -5,7 +5,7 @@ use walkdir::WalkDir;
 extern crate png;
 
 use crate::modules::{FONTS, FONT_NAMES};
-const SIZES: [f32; 1] = [32.0];
+const SIZES: [f32; 4] = [8.0, 12.0, 32.0, 64.0];
 
 fn clean_local_baselines() {
     fs::remove_dir_all("./resources/baselines/local/characters").ok();

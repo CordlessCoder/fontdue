@@ -136,7 +136,7 @@ pub trait FontRepr {
     #[inline]
     fn rasterize_config<'r>(
         &self,
-        raster: &'r mut Raster,
+        raster: &'r mut Raster<'_>,
         config: GlyphRasterConfig,
     ) -> (Metrics, BitmapIter<'r>) {
         self.rasterize_indexed(raster, config.glyph_index, config.px)
@@ -157,7 +157,12 @@ pub trait FontRepr {
     /// 0% coverage of that pixel by the glyph and 255 represents 100% coverage. The vec starts at
     /// the top left corner of the glyph.
     #[inline]
-    fn rasterize<'r>(&self, canvas: &'r mut Raster, character: char, px: f32) -> (Metrics, BitmapIter<'r>) {
+    fn rasterize<'r>(
+        &self,
+        canvas: &'r mut Raster<'_>,
+        character: char,
+        px: f32,
+    ) -> (Metrics, BitmapIter<'r>) {
         self.rasterize_indexed(canvas, self.lookup_glyph_index(character), px)
     }
 
@@ -179,7 +184,7 @@ pub trait FontRepr {
     #[inline]
     fn rasterize_config_subpixel<'r>(
         &self,
-        canvas: &'r mut Raster,
+        canvas: &'r mut Raster<'_>,
         config: GlyphRasterConfig,
     ) -> (Metrics, BitmapIter<'r>) {
         self.rasterize_indexed_subpixel(canvas, config.glyph_index, config.px)
@@ -205,7 +210,7 @@ pub trait FontRepr {
     #[inline]
     fn rasterize_subpixel<'r>(
         &self,
-        canvas: &'r mut Raster,
+        canvas: &'r mut Raster<'_>,
         character: char,
         px: f32,
     ) -> (Metrics, BitmapIter<'r>) {
@@ -227,7 +232,7 @@ pub trait FontRepr {
     /// the top left corner of the glyph.
     fn rasterize_indexed<'r>(
         &self,
-        canvas: &'r mut Raster,
+        canvas: &'r mut Raster<'_>,
         index: u16,
         px: f32,
     ) -> (Metrics, BitmapIter<'r>) {

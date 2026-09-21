@@ -1,4 +1,16 @@
+#[cfg(target_arch = "xtensa")]
+#[inline(always)]
+pub fn floor(x: f32) -> f32 {
+    let truncated = super::trunc(x);
+    if truncated > x {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
 // [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
+#[cfg(not(target_arch = "xtensa"))]
 pub fn floor(x: f32) -> f32 {
     let mut ui = x.to_bits();
     let e = (((ui >> 23) as i32) & 0xff) - 0x7f;

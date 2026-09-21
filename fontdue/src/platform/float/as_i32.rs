@@ -1,4 +1,16 @@
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+#[cfg(all(
+    target_arch = "xtensa",
+    not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
+))]
+#[inline(always)]
+pub fn as_i32(value: f32) -> i32 {
+    unsafe { value.to_int_unchecked() }
+}
+
+#[cfg(all(
+    not(target_arch = "xtensa"),
+    not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
+))]
 #[inline(always)]
 pub fn as_i32(value: f32) -> i32 {
     value as i32

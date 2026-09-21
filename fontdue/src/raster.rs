@@ -10,20 +10,25 @@ use crate::platform::{abs, as_i32, copysign, f32x4, fract};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
-pub struct Raster {
-    w: usize,
-    h: usize,
-    a: Vec<f32>,
+enum RasterBuffer<'a> {
+    Owned(Vec<f32>),
+    Borrowed(&'a mut [f32]),
 }
 
-impl Raster {
+pub struct Raster<'a> {
+    w: usize,
+    h: usize,
+    a: RasterBuffer<'a>,
+}
+
+impl Raster<'static> {
     #[inline]
     pub fn empty() -> Self {
         Raster::new(0, 0)
     }
 
     #[inline]
-    pub fn new(w: usize, h: usize) -> Raster {
+    pub fn new(w: usize, h: usize) -> Raster<'static> {
         Raster::from_buf(Vec::new(), w, h)
     }
 
@@ -32,17 +37,44 @@ impl Raster {
         let mut r = Raster {
             w,
             h,
-            a: buf,
+            a: RasterBuffer::Owned(buf),
         };
         r.resize(w, h);
         r
+    }
+}
+
+impl<'a> Raster<'a> {
+    /// Creates a raster backed by caller-owned storage.
+    ///
+    /// The slice must also fit every later size passed to the rasterizer.
+    #[inline]
+    pub fn from_slice(buf: &'a mut [f32], w: usize, h: usize) -> Option<Self> {
+        if buf.len() < w.checked_mul(h)?.checked_add(3)? {
+            return None;
+        }
+        let mut r = Raster {
+            w,
+            h,
+            a: RasterBuffer::Borrowed(buf),
+        };
+        r.resize(w, h);
+        Some(r)
     }
 
     pub(crate) fn resize(&mut self, w: usize, h: usize) {
         self.w = w;
         self.h = h;
-        self.a.fill(0.0);
-        self.a.resize(w * h + 3, 0.0);
+        match &mut self.a {
+            RasterBuffer::Owned(a) => {
+                a.fill(0.0);
+                a.resize(w * h + 3, 0.0);
+            }
+            RasterBuffer::Borrowed(a) => {
+                let len = w * h + 3;
+                a[..len].fill(0.0);
+            }
+        }
     }
 
     pub(crate) fn draw(
@@ -57,10 +89,13 @@ impl Raster {
         let scale = f32x4::new(scale_x, scale_y, scale_x, scale_y);
         let offset = f32x4::new(offset_x, offset_y, offset_x, offset_y);
         for line in glyph.v_lines {
-            self.v_line(line, line.coords * scale + offset);
+            let (nudge, adjustment, _) = line.raster_parts();
+            self.v_line(line, line.coords * scale + offset, nudge, adjustment);
         }
         for line in glyph.m_lines {
-            self.m_line(line, line.coords * scale + offset, line.params * params);
+            let (nudge, adjustment, mut line_params) = line.raster_parts();
+            line_params = line_params * params;
+            self.m_line(line, line.coords * scale + offset, nudge, adjustment, line_params);
         }
     }
 
@@ -69,8 +104,12 @@ impl Raster {
         // This is fast and hip.
         unsafe {
             let m = height * mid_x;
-            *self.a.get_unchecked_mut(index) += height - m;
-            *self.a.get_unchecked_mut(index + 1) += m;
+            let a = match &mut self.a {
+                RasterBuffer::Owned(a) => a.as_mut_slice(),
+                RasterBuffer::Borrowed(a) => a,
+            };
+            *a.get_unchecked_mut(index) += height - m;
+            *a.get_unchecked_mut(index + 1) += m;
         }
 
         // This is safe but slow.
@@ -80,11 +119,11 @@ impl Raster {
     }
 
     #[inline(always)]
-    fn v_line(&mut self, line: &Line, coords: f32x4) {
+    fn v_line(&mut self, _line: &Line, coords: f32x4, nudge: f32x4, adjustment: f32x4) {
         let (x0, y0, _, y1) = coords.copied();
-        let temp = coords.sub_integer(line.nudge).trunc();
+        let temp = coords.sub_integer(nudge).trunc();
         let (start_x, start_y, end_x, end_y) = temp.copied();
-        let (_, mut target_y, _, _) = (temp + line.adjustment).copied();
+        let (_, mut target_y, _, _) = (temp + adjustment).copied();
         let sy = copysign(1f32, y1 - y0);
         let mut y_prev = y0;
         let mut index = as_i32(start_x + start_y * self.w as f32);
@@ -102,12 +141,12 @@ impl Raster {
     }
 
     #[inline(always)]
-    fn m_line(&mut self, line: &Line, coords: f32x4, params: f32x4) {
+    fn m_line(&mut self, _line: &Line, coords: f32x4, nudge: f32x4, adjustment: f32x4, params: f32x4) {
         let (x0, y0, x1, y1) = coords.copied();
-        let temp = coords.sub_integer(line.nudge).trunc();
+        let temp = coords.sub_integer(nudge).trunc();
         let (start_x, start_y, end_x, end_y) = temp.copied();
         let (tdx, tdy, dx, dy) = params.copied();
-        let (mut target_x, mut target_y, _, _) = (temp + line.adjustment).copied();
+        let (mut target_x, mut target_y, _, _) = (temp + adjustment).copied();
         let sx = copysign(1f32, tdx);
         let sy = copysign(1f32, tdy);
         let mut tmx = tdx * (target_x - x0);
@@ -148,7 +187,10 @@ impl Raster {
     #[inline(always)]
     pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
         BitmapIter {
-            a: &self.a,
+            a: match &self.a {
+                RasterBuffer::Owned(a) => a,
+                RasterBuffer::Borrowed(a) => a,
+            },
             pos: 0,
             remaining: self.w * self.h,
             height: 0.0,
@@ -181,8 +223,16 @@ impl BitmapIter<'_> {
     #[inline(always)]
     fn step(height: &mut f32, delta: f32) -> u8 {
         *height += delta;
-        // The cast saturates, so coverage over 1.0 pins to 255 rather than wrapping.
-        (abs(*height) * 255.9) as u8
+        let coverage = abs(*height) * 255.9;
+        debug_assert!(coverage.is_finite());
+        let coverage = if coverage > 255.0 {
+            255.0
+        } else {
+            coverage
+        };
+        // `Geometry::push` removes horizontal segments, so every non-vertical line has finite
+        // reciprocals. Its area accumulation therefore cannot produce a NaN here.
+        unsafe { coverage.to_int_unchecked::<u8>() }
     }
 
     /// Computes the next four bytes in one go. Spreading the float dependency chain over four

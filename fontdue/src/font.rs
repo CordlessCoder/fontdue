@@ -313,7 +313,7 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
 }
 
 #[inline(always)]
-pub fn rasterize_inner(canvas: &mut Raster, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
+pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
     let (metrics, offset_x, offset_y) = metrics_raw(scale, glyph, 0.0);
     canvas.resize(metrics.width, metrics.height);
     canvas.draw(&glyph, scale * stretch, scale, offset_x, offset_y);

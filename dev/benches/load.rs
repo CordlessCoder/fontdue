@@ -3,6 +3,7 @@ extern crate criterion;
 
 use criterion::{measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion};
 use fontdue::raster::Raster;
+use fontdue::FontRepr;
 
 type SetupFunction = fn(&mut BenchmarkGroup<WallTime>, &str, &[u8]);
 

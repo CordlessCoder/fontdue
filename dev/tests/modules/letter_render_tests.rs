@@ -1,4 +1,4 @@
-use fontdue::{raster::Raster, Font, FontSettings};
+use fontdue::{raster::Raster, Font, FontRepr, FontSettings};
 
 use crate::modules::FONTS;
 const SIZES: [f32; 3] = [1024.0, 8.0, 2.0];

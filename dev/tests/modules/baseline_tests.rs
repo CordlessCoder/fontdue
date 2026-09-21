@@ -1,4 +1,4 @@
-use fontdue::{raster::Raster, Font, FontSettings};
+use fontdue::{raster::Raster, Font, FontRepr, FontSettings};
 use std::{convert::TryInto, fs, io::Cursor, path::Path};
 use walkdir::WalkDir;
 

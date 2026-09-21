@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Write;
 
 use fontdue::raster::Raster;
+use fontdue::FontRepr;
 
 // Scratch pad for glyphs: ⅞ g ₹
 const CHARACTER: char = '₹';

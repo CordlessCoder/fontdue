@@ -1,6 +1,7 @@
 //! Generates grayscale and unfiltered subpixel RGB output for Fontdue in the terminal.
 
 use fontdue::raster::Raster;
+use fontdue::FontRepr;
 
 const CHARACTER: char = 'b';
 const SIZE: f32 = 20.0;
@@ -33,7 +34,9 @@ pub fn print_normal(font: &fontdue::Font) {
 }
 
 pub fn print_subpixel(font: &fontdue::Font) {
-    let (metrics, bitmap) = font.rasterize_subpixel(CHARACTER, SIZE);
+    let mut canvas = Raster::empty();
+    let (metrics, bitmap) = font.rasterize_subpixel(&mut canvas, CHARACTER, SIZE);
+    let bitmap = bitmap.collect::<Vec<u8>>();
     for y in 0..metrics.height {
         for x in (0..metrics.width * 3).step_by(3) {
             let char_r = bitmap[x + y * metrics.width * 3];

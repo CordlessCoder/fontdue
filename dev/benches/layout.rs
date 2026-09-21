@@ -3,6 +3,7 @@ extern crate criterion;
 
 use criterion::{BenchmarkId, Criterion};
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
+use fontdue::FontRepr;
 use glyph_brush_layout::{ab_glyph::*, *};
 
 const MESSAGES: [&str; 3] = ["Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore ", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Tempor orci eu lobortis elementum nibh tellus. Mi tempus imperdiet nulla malesuada pellentesque elit eget gravida cum. Non nisi est sit amet facilisis magna etiam tempor. In fermentum et sollicitudin ac. Nunc consequat interdum varius sit amet mattis. Est velit egestas dui id ornare arcu odio ut. Venenatis lectus magna fringilla urna porttitor rhoncus dolor purus non. Lobor", "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Feugiat nibh sed pulvinar proin gravida hendrerit. Duis ut diam quam nulla porttitor massa id neque. Lacus viverra vitae congue eu consequat ac felis. Etiam non quam lacus suspendisse faucibus. Eget mauris pharetra et ultrices neque ornare. Libero id faucibus nisl tincidunt eget nullam non. Justo laoreet sit amet cursus sit amet. Velit laoreet id donec ultrices tincidunt arcu non sodales neque.
@@ -18,7 +19,7 @@ fn fontdue_layout_benchmark(c: &mut Criterion) {
         max_width: Some(200.0),
         ..LayoutSettings::default()
     });
-    let fonts = &[roboto_regular];
+    let fonts: &[&dyn FontRepr] = &[&roboto_regular];
 
     let mut group = c.benchmark_group("layout/fontdue");
     group.measurement_time(core::time::Duration::from_secs(4));

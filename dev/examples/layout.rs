@@ -1,7 +1,7 @@
 //! Performs basic text layout in Fontdue.
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
-use fontdue::Font;
+use fontdue::{Font, FontRepr};
 
 // cargo run --example layout --release
 pub fn main() {
@@ -10,7 +10,7 @@ pub fn main() {
     // Parse it into the font type.
     let roboto_regular = Font::from_bytes(font, fontdue::FontSettings::default()).unwrap();
     // The list of fonts that will be used during layout.
-    let fonts = &[roboto_regular];
+    let fonts: &[&dyn FontRepr] = &[&roboto_regular];
     // Create a layout context. Laying out text needs some heap allocations; reusing this context
     // reduces the need to reallocate space. We inform layout of which way the Y axis points here.
     let mut layout = Layout::new(CoordinateSystem::PositiveYUp);

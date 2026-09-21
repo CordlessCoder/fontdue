@@ -1,3 +1,7 @@
+# Not a member of the root workspace: dev has its own lockfile and CI builds it
+# from this directory. The empty table makes that explicit to cargo.
+[workspace]
+
 [package]
 name = "fontdue_dev"
 version = "0.1.0"

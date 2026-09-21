@@ -6,7 +6,7 @@
 
 use crate::GlyphRef;
 use crate::math::Line;
-use crate::platform::{abs, as_i32, bitmap_block, copysign, f32x4, fract};
+use crate::platform::{abs, as_i32, copysign, f32x4, fract};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
@@ -152,7 +152,7 @@ impl Raster {
             pos: 0,
             remaining: self.w * self.h,
             height: 0.0,
-            block: [0; 4],
+            block: [0; BLOCK],
             block_pos: BLOCK,
         }
     }
@@ -160,15 +160,16 @@ impl Raster {
 
 const BLOCK: usize = 4;
 
+/// Running prefix sum over the area deltas, yielding one coverage byte per pixel.
 pub struct BitmapIter<'r> {
     /// Area deltas. `resize` keeps this at `w * h + 3`, and those three slots are what let the
     /// final block read four floats without running off the end. Shortening the slack breaks this
     /// iterator before it breaks `Raster::add`.
     a: &'r [f32],
-    /// Index of the next block of deltas to consume.
+    /// Index of the next delta to consume.
     pos: usize,
     remaining: usize,
-    /// Running coverage total at `pos`, carried from block to block.
+    /// Coverage total accumulated up to `pos`.
     height: f32,
     block: [u8; BLOCK],
     /// Next byte to yield from `block`; `BLOCK` once it is spent.
@@ -176,12 +177,21 @@ pub struct BitmapIter<'r> {
 }
 
 impl BitmapIter<'_> {
+    /// Folds one delta into the running total and returns its coverage byte.
+    #[inline(always)]
+    fn step(height: &mut f32, delta: f32) -> u8 {
+        *height += delta;
+        // The cast saturates, so coverage over 1.0 pins to 255 rather than wrapping.
+        (abs(*height) * 255.9) as u8
+    }
+
+    /// Computes the next four bytes in one go. Spreading the float dependency chain over four
+    /// pixels is what makes `next` cheap enough for `collect`.
     #[inline(always)]
     fn refill(&mut self) {
-        let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
-        let (block, height) = bitmap_block(chunk, self.height);
-        self.block = block;
-        self.height = height;
+        for i in 0..BLOCK {
+            self.block[i] = Self::step(&mut self.height, self.a[self.pos + i]);
+        }
         self.pos += BLOCK;
         self.block_pos = 0;
     }
@@ -204,9 +214,9 @@ impl Iterator for BitmapIter<'_> {
         Some(v)
     }
 
-    /// Internal iteration, which skips the per-byte buffer bookkeeping `next` has to do. This is
-    /// the path `for_each`, `count` and `sum` take; `collect` does not, since `Vec` extends through
-    /// `next` for iterators that are not `TrustedLen`.
+    /// Internal iteration walks the deltas directly, with no buffering at all. This is the path
+    /// `for_each`, `count` and `sum` take; `collect` does not, since `Vec` extends through `next`
+    /// for iterators that are not `TrustedLen`.
     fn fold<B, F>(mut self, init: B, mut f: F) -> B
     where
         F: FnMut(B, Self::Item) -> B,
@@ -217,23 +227,8 @@ impl Iterator for BitmapIter<'_> {
             self.block_pos += 1;
             self.remaining -= 1;
         }
-        while self.remaining >= BLOCK {
-            let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
-            let (block, height) = bitmap_block(chunk, self.height);
-            self.height = height;
-            self.pos += BLOCK;
-            for v in block {
-                acc = f(acc, v);
-            }
-            self.remaining -= BLOCK;
-        }
-        if self.remaining > 0 {
-            let chunk: [f32; BLOCK] = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
-            let (block, _) = bitmap_block(chunk, self.height);
-            for &v in &block[..self.remaining] {
-                acc = f(acc, v);
-            }
-            self.remaining = 0;
+        for &delta in &self.a[self.pos..self.pos + self.remaining] {
+            acc = f(acc, Self::step(&mut self.height, delta));
         }
         acc
     }

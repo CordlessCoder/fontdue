@@ -5,8 +5,7 @@
  */
 
 use crate::GlyphRef;
-use crate::math::Line;
-use crate::platform::{abs, as_i32, copysign, f32x4, fract};
+use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, fract};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
@@ -47,7 +46,10 @@ impl Raster<'static> {
 impl<'a> Raster<'a> {
     /// Creates a raster backed by caller-owned storage.
     ///
-    /// The slice must also fit every later size passed to the rasterizer.
+    /// `buf` must hold `w * h + 3` floats. It must also fit every later size the rasterizer
+    /// resizes to, which for a font means the largest glyph at the largest px the caller will
+    /// ask for, not the size passed here. A later size that does not fit panics, so a caller
+    /// with a fixed buffer should size it from the font's bounding box up front.
     #[inline]
     pub fn from_slice(buf: &'a mut [f32], w: usize, h: usize) -> Option<Self> {
         if buf.len() < w.checked_mul(h)?.checked_add(3)? {
@@ -63,15 +65,18 @@ impl<'a> Raster<'a> {
     }
 
     pub(crate) fn resize(&mut self, w: usize, h: usize) {
+        // Checked, because `add` indexes with `get_unchecked_mut` off `w` and `h`. A wrapped
+        // length would leave the buffer shorter than the dimensions the raster then trusts.
+        let len =
+            w.checked_mul(h).and_then(|area| area.checked_add(3)).expect("raster dimensions overflow usize");
         self.w = w;
         self.h = h;
         match &mut self.a {
             RasterBuffer::Owned(a) => {
                 a.fill(0.0);
-                a.resize(w * h + 3, 0.0);
+                a.resize(len, 0.0);
             }
             RasterBuffer::Borrowed(a) => {
-                let len = w * h + 3;
                 a[..len].fill(0.0);
             }
         }
@@ -90,12 +95,12 @@ impl<'a> Raster<'a> {
         let offset = f32x4::new(offset_x, offset_y, offset_x, offset_y);
         for line in glyph.v_lines {
             let (nudge, adjustment, _) = line.raster_parts();
-            self.v_line(line, line.coords * scale + offset, nudge, adjustment);
+            self.v_line(line.coords * scale + offset, nudge, adjustment);
         }
         for line in glyph.m_lines {
             let (nudge, adjustment, mut line_params) = line.raster_parts();
             line_params = line_params * params;
-            self.m_line(line, line.coords * scale + offset, nudge, adjustment, line_params);
+            self.m_line(line.coords * scale + offset, nudge, adjustment, line_params);
         }
     }
 
@@ -119,16 +124,16 @@ impl<'a> Raster<'a> {
     }
 
     #[inline(always)]
-    fn v_line(&mut self, _line: &Line, coords: f32x4, nudge: f32x4, adjustment: f32x4) {
+    fn v_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: f32x4) {
         let (x0, y0, _, y1) = coords.copied();
         let temp = coords.sub_integer(nudge).trunc();
         let (start_x, start_y, end_x, end_y) = temp.copied();
         let (_, mut target_y, _, _) = (temp + adjustment).copied();
         let sy = copysign(1f32, y1 - y0);
         let mut y_prev = y0;
-        let mut index = as_i32(start_x + start_y * self.w as f32);
-        let index_y_inc = as_i32(copysign(self.w as f32, sy));
-        let mut dist = as_i32(abs(start_y - end_y));
+        let mut index = index_of(start_x + start_y * self.w as f32);
+        let index_y_inc = index_of(copysign(self.w as f32, sy));
+        let mut dist = index_of(abs(start_y - end_y));
         let mid_x = fract(x0);
         while dist > 0 {
             dist -= 1;
@@ -137,11 +142,11 @@ impl<'a> Raster<'a> {
             y_prev = target_y;
             target_y += sy;
         }
-        self.add(as_i32(end_x + end_y * self.w as f32) as usize, y_prev - y1, mid_x);
+        self.add(index_of(end_x + end_y * self.w as f32) as usize, y_prev - y1, mid_x);
     }
 
     #[inline(always)]
-    fn m_line(&mut self, _line: &Line, coords: f32x4, nudge: f32x4, adjustment: f32x4, params: f32x4) {
+    fn m_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: f32x4, params: f32x4) {
         let (x0, y0, x1, y1) = coords.copied();
         let temp = coords.sub_integer(nudge).trunc();
         let (start_x, start_y, end_x, end_y) = temp.copied();
@@ -155,10 +160,10 @@ impl<'a> Raster<'a> {
         let tdy = abs(tdy);
         let mut x_prev = x0;
         let mut y_prev = y0;
-        let mut index = as_i32(start_x + start_y * self.w as f32);
-        let index_x_inc = as_i32(sx);
-        let index_y_inc = as_i32(copysign(self.w as f32, sy));
-        let mut dist = as_i32(abs(start_x - end_x) + abs(start_y - end_y));
+        let mut index = index_of(start_x + start_y * self.w as f32);
+        let index_x_inc = index_of(sx);
+        let index_y_inc = index_of(copysign(self.w as f32, sy));
+        let mut dist = index_of(abs(start_x - end_x) + abs(start_y - end_y));
         while dist > 0 {
             dist -= 1;
             let prev_index = index;
@@ -181,7 +186,7 @@ impl<'a> Raster<'a> {
             x_prev = x_next;
             y_prev = y_next;
         }
-        self.add(as_i32(end_x + end_y * self.w as f32) as usize, y_prev - y1, fract((x_prev + x1) / 2.0));
+        self.add(index_of(end_x + end_y * self.w as f32) as usize, y_prev - y1, fract((x_prev + x1) / 2.0));
     }
 
     #[inline(always)]
@@ -198,6 +203,18 @@ impl<'a> Raster<'a> {
             block_pos: BLOCK,
         }
     }
+}
+
+/// Float-to-int for the line loops.
+///
+/// `draw` is only ever reached through `rasterize_inner`, which sizes the raster from
+/// `metrics_raw` and then scales every coordinate into it. Every value converted here is a pixel
+/// index or a step count inside those bounds, so the unchecked convert has its precondition. This
+/// is the same trust `add` already places in the caller, and the notice at the top of the file is
+/// about exactly this.
+#[inline(always)]
+fn index_of(value: f32) -> i32 {
+    unsafe { as_i32_unchecked(value) }
 }
 
 const BLOCK: usize = 4;
@@ -224,14 +241,15 @@ impl BitmapIter<'_> {
     fn step(height: &mut f32, delta: f32) -> u8 {
         *height += delta;
         let coverage = abs(*height) * 255.9;
-        debug_assert!(coverage.is_finite());
-        let coverage = if coverage > 255.0 {
-            255.0
-        } else {
+        // Written as `< 255.0` rather than `> 255.0` so a NaN fails the comparison and lands on
+        // 255.0. `abs` covers the lower bound, so the conversion below is total for every input
+        // and needs no argument about what the geometry can produce. Both forms cost the same.
+        let coverage = if coverage < 255.0 {
             coverage
+        } else {
+            255.0
         };
-        // `Geometry::push` removes horizontal segments, so every non-vertical line has finite
-        // reciprocals. Its area accumulation therefore cannot produce a NaN here.
+        // SAFETY: `coverage` is in `[0.0, 255.0]` by the clamp above.
         unsafe { coverage.to_int_unchecked::<u8>() }
     }
 

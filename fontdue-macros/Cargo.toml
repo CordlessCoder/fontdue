@@ -8,5 +8,6 @@ proc-macro = true
 
 [dependencies]
 fontdue = { path = "../fontdue/" }
+litrs = { version = "1.0.0", features = ["proc-macro2"] }
 proc-macro2 = "1.0.106"
 quote = "1.0.45"

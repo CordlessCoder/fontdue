@@ -1,4 +1,10 @@
-// [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
+// Xtensa has no float round-to-integer instruction and no saturating convert, so the portable
+// bit-twiddling form below costs 20 instructions where a raw convert-and-back costs 6. Only the
+// raster calls this, through `f32x4::trunc`, and its coordinates are bounded by the glyph
+// dimensions `metrics_raw` produced. Nothing else in the crate may call it on this target.
+//
+// The convert is unchecked: a non-finite input, or one that does not fit `i32`, is undefined
+// behaviour here where every other target saturates.
 #[cfg(all(
     target_arch = "xtensa",
     not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
@@ -7,6 +13,8 @@
 pub fn trunc(value: f32) -> f32 {
     unsafe { value.to_int_unchecked::<i32>() as f32 }
 }
+
+// [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
 
 #[cfg(all(
     not(target_arch = "xtensa"),

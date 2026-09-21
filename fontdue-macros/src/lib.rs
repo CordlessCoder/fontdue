@@ -135,9 +135,16 @@ fn fontdue_font_from_file_impl(
                     let TokenTree::Literal(lit) = tokens.next().unwrap() else {
                         panic!("Expected string literal to follow chars:")
                     };
-                    let value = lit.to_string();
-                    let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap();
-                    subset_chars = Some(value.chars().collect::<Vec<_>>());
+                    // Through litrs rather than trimming the quotes off `to_string`, which leaves
+                    // escapes as their source characters and takes `"\u{b0}"` to mean nine glyphs.
+                    let lit = match litrs::StringLit::try_from(&lit) {
+                        Ok(lit) => lit,
+                        Err(err) => panic!("chars: expects a string literal: {err}"),
+                    };
+                    let mut chars = lit.value().chars().collect::<Vec<_>>();
+                    chars.sort_unstable();
+                    chars.dedup();
+                    subset_chars = Some(chars);
                 }
                 _ => unimplemented!(),
             },

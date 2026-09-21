@@ -5,6 +5,8 @@ use fontdue_macros::fontdue_font_from_file;
 
 fontdue_font_from_file!(BakedRoboto, "../resources/fonts/Roboto-Regular.ttf", scale: 32);
 fontdue_font_from_file!(BakedRobotoAscii, "../resources/fonts/Roboto-Regular.ttf", scale: 32, chars: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789");
+fontdue_font_from_file!(BakedRobotoEscaped, "../resources/fonts/Roboto-Regular.ttf", scale: 32, chars: "AB\u{00b0}");
+fontdue_font_from_file!(BakedRobotoRaw, "../resources/fonts/Roboto-Regular.ttf", scale: 32, chars: r"AB\");
 
 #[test]
 fn baked_and_runtime_render_identically() {
@@ -45,3 +47,23 @@ fn raster_accepts_exact_caller_storage() {
     assert_eq!(storage, [0.0; 4]);
     assert!(fontdue::raster::Raster::from_slice(&mut storage[..3], 1, 1).is_none());
 }
+
+#[test]
+fn baked_subset_unescapes_the_char_literal() {
+    // Trimming the quotes off the literal's source text would put `\`, `u`, `{`, `0`, `b` in the
+    // subset and leave the degree sign out.
+    assert_eq!(BakedRobotoEscaped.glyph_count(), 4);
+    assert_ne!(BakedRobotoEscaped.lookup_glyph_index('\u{00b0}'), 0);
+    assert_eq!(BakedRobotoEscaped.lookup_glyph_index('u'), 0);
+    assert_eq!(BakedRobotoEscaped.lookup_glyph_index('\\'), 0);
+
+    assert_eq!(BakedRobotoRaw.glyph_count(), 4);
+    assert_ne!(BakedRobotoRaw.lookup_glyph_index('\\'), 0);
+}
+
+#[test]
+fn baked_subset_tolerates_repeated_characters() {
+    assert_eq!(BakedRobotoEscaped.glyph_count(), BakedRobotoRepeat.glyph_count());
+}
+
+fontdue_font_from_file!(BakedRobotoRepeat, "../resources/fonts/Roboto-Regular.ttf", scale: 32, chars: "AABB\u{00b0}");

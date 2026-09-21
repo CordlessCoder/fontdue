@@ -130,3 +130,34 @@ fn baseline_all() {
     }
     report_changed_baselines();
 }
+
+/// Guards the oversized reference corpus in both directions.
+///
+/// More than one size means `EXPANDED.md` must exist and say why. One size means it must not,
+/// so the marker cannot outlive the reason for it. See that file for the restore condition.
+#[test]
+fn expanded_corpus_is_declared() {
+    let marker = Path::new("./resources/baselines/EXPANDED.md");
+    let references = WalkDir::new("./resources/baselines/reference/characters")
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_file())
+        .count();
+    println!("{} sizes, {references} reference images", SIZES.len());
+
+    if SIZES.len() > 1 {
+        assert!(
+            marker.exists(),
+            "SIZES renders {} sizes and {references} reference images. Write \
+             dev/resources/baselines/EXPANDED.md saying why the corpus is oversized and what \
+             restores it, or cut SIZES back to one size.",
+            SIZES.len()
+        );
+    } else {
+        assert!(
+            !marker.exists(),
+            "SIZES is back to one size but dev/resources/baselines/EXPANDED.md is still there. \
+             Delete it, and delete the references for the sizes that went with it."
+        );
+    }
+}

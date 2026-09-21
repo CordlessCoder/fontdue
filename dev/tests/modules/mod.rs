@@ -1,5 +1,6 @@
 pub mod baseline_tests;
 pub mod letter_render_tests;
+pub mod tolerance_tests;
 
 pub static FONT_NAMES: [&str; 8] = [
     "Roboto-Regular",

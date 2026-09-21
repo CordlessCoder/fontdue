@@ -288,7 +288,15 @@ fn convert_name(face: &Face) -> Option<String> {
     None
 }
 
+/// Largest `f32` below `i32::MAX`. Above this `as_i32` saturates instead of converting.
+const MAX_DIMENSION: f32 = 2147483520.0;
+
 /// Internal function to generate the metrics, offset_x, and offset_y of the glyph.
+///
+/// # Panics
+///
+/// If `scale` puts the glyph's bounds outside `i32`. That covers a NaN, infinite or negative
+/// `px`, none of which have a meaningful raster.
 #[doc(hidden)]
 pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f32, f32) {
     let bounds = glyph.bounds.scale(scale);
@@ -300,11 +308,27 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
     if is_negative(offset_y) {
         offset_y += 1.0;
     }
+    let xmin = floor(bounds.xmin);
+    let ymin = floor(bounds.ymin);
+    let width = ceil(bounds.width + offset_x);
+    let height = ceil(bounds.height + offset_y);
+    // `as_i32` saturates, and every later stage trusts the dimensions it produces: `resize` sizes
+    // the buffer from them and `add` indexes it with `get_unchecked_mut`. A px large enough to
+    // saturate the width while the height truncated to zero sized the buffer at three floats and
+    // then wrote past it. A range check rejects that, and rejects NaN, infinite and negative px
+    // with it, because none of those compare inside the range.
+    assert!(
+        (-MAX_DIMENSION..=MAX_DIMENSION).contains(&xmin)
+            && (-MAX_DIMENSION..=MAX_DIMENSION).contains(&ymin)
+            && (0.0..=MAX_DIMENSION).contains(&width)
+            && (0.0..=MAX_DIMENSION).contains(&height),
+        "px out of range: this glyph at scale {scale} does not fit i32"
+    );
     let metrics = Metrics {
-        xmin: as_i32(floor(bounds.xmin)),
-        ymin: as_i32(floor(bounds.ymin)),
-        width: as_i32(ceil(bounds.width + offset_x)) as usize,
-        height: as_i32(ceil(bounds.height + offset_y)) as usize,
+        xmin: as_i32(xmin),
+        ymin: as_i32(ymin),
+        width: as_i32(width) as usize,
+        height: as_i32(height) as usize,
         advance_width: scale * glyph.advance_width,
         advance_height: scale * glyph.advance_height,
         bounds,

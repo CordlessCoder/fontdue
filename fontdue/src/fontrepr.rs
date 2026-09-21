@@ -57,6 +57,11 @@ pub trait FontRepr {
     /// pixels per Em unit.
     #[inline(always)]
     fn scale_factor(&self, px: f32) -> f32 {
+        // Every path that turns a px size into geometry comes through here, so this is where a
+        // NaN, an infinity or a negative is cheapest to reject. None of the three has a
+        // meaningful raster, and letting one reach `metrics_raw` produces dimensions the raster
+        // then trusts while indexing with `get_unchecked_mut`.
+        assert!((0.0..=f32::MAX).contains(&px), "px must be finite and non-negative, got {px}");
         px / self.units_per_em()
     }
 
@@ -236,7 +241,7 @@ pub trait FontRepr {
         index: u16,
         px: f32,
     ) -> (Metrics, BitmapIter<'r>) {
-        if px <= 0.0 {
+        if px == 0.0 {
             canvas.resize(0, 0);
             return (Metrics::default(), canvas.get_bitmap_iter());
         }
@@ -268,7 +273,7 @@ pub trait FontRepr {
         index: u16,
         px: f32,
     ) -> (Metrics, BitmapIter<'r>) {
-        if px <= 0.0 {
+        if px == 0.0 {
             canvas.resize(0, 0);
             return (Metrics::default(), canvas.get_bitmap_iter());
         }

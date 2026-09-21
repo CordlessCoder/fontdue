@@ -67,3 +67,40 @@ fn baked_subset_tolerates_repeated_characters() {
 }
 
 fontdue_font_from_file!(BakedRobotoRepeat, "../resources/fonts/Roboto-Regular.ttf", scale: 32, chars: "AABB\u{00b0}");
+
+fn roboto() -> Font {
+    Font::from_bytes(&include_bytes!("../resources/fonts/Roboto-Regular.ttf")[..], FontSettings::default())
+        .unwrap()
+}
+
+#[test]
+fn invalid_px_panics_instead_of_writing_out_of_bounds() {
+    // 1e20 used to saturate the width to usize::MAX while the height truncated to 0, so the
+    // raster allocated three floats for a glyph it then indexed at 1e19.
+    for px in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -32.0, 1e20, 1e30] {
+        let font = roboto();
+        assert!(
+            std::panic::catch_unwind(move || font.metrics('A', px)).is_err(),
+            "metrics should reject px = {px}"
+        );
+        let font = roboto();
+        assert!(
+            std::panic::catch_unwind(move || {
+                let mut raster = fontdue::raster::Raster::empty();
+                font.rasterize(&mut raster, 'A', px).1.count()
+            })
+            .is_err(),
+            "rasterize should reject px = {px}"
+        );
+    }
+}
+
+#[test]
+fn extreme_but_valid_px_still_renders() {
+    let font = roboto();
+    for px in [0.0, 1.0, 2000.0] {
+        let mut raster = fontdue::raster::Raster::empty();
+        let (metrics, bitmap) = font.rasterize(&mut raster, 'A', px);
+        assert_eq!(bitmap.count(), metrics.width * metrics.height, "px = {px}");
+    }
+}

@@ -346,12 +346,7 @@ fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch:
 #[inline(always)]
 pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
     let (metrics, offset_x, offset_y) = metrics_raw_stretched(scale, glyph, 0.0, stretch);
-    let raster_width = if stretch == 1.0 {
-        metrics.width
-    } else {
-        assert_eq!(stretch, 3.0, "unsupported raster stretch");
-        metrics.width.checked_mul(3).expect("stretched raster width overflow")
-    };
+    let raster_width = as_i32(metrics.width as f32 * stretch) as usize;
     canvas.resize(raster_width, metrics.height);
     canvas.draw(&glyph, scale * stretch, scale, offset_x * stretch, offset_y);
     metrics

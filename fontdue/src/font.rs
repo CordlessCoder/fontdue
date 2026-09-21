@@ -346,7 +346,11 @@ fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch:
 #[inline(always)]
 pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
     let (metrics, offset_x, offset_y) = metrics_raw_stretched(scale, glyph, 0.0, stretch);
-    let raster_width = as_i32(metrics.width as f32 * stretch) as usize;
+    // Ceiling, not truncation. `draw` scales x by `stretch`, so a fractional product still writes
+    // into the column it lands inside, and a truncated width hands `add` a row shorter than it
+    // fills. Only 1.0 and 3.0 reach this today and both are exact, so nothing here is load-bearing
+    // for the shipped paths; it stops the general form from being wrong.
+    let raster_width = as_i32(ceil(metrics.width as f32 * stretch)) as usize;
     canvas.resize(raster_width, metrics.height);
     canvas.draw(&glyph, scale * stretch, scale, offset_x * stretch, offset_y);
     metrics

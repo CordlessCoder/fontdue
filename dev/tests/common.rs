@@ -93,6 +93,28 @@ fn subpixel_triplet_average_matches_grayscale() {
 }
 
 #[test]
+fn stretched_raster_covers_every_column_it_writes() {
+    let font = Font::from_bytes(
+        &include_bytes!("../resources/fonts/Roboto-Regular.ttf")[..],
+        FontSettings::default(),
+    )
+    .unwrap();
+    let glyph = font.get_glyph_at_index(font.lookup_glyph_index('W'));
+    // 1.0 and 3.0 are the only stretches the public entry points use and both land on whole
+    // columns. 1.5 and 2.5 do not, and `rasterize_inner` is reachable on its own.
+    for stretch in [1.0f32, 1.5, 2.5, 3.0] {
+        for px in [101.0f32, 202.0] {
+            let scale = font.scale_factor(px);
+            let mut raster = fontdue::raster::Raster::empty();
+            let metrics = fontdue::rasterize_inner(&mut raster, &glyph, scale, stretch);
+            let columns = raster.get_bitmap_iter().count() / metrics.height;
+            let needed = (metrics.width as f32 * stretch).ceil() as usize;
+            assert_eq!(columns, needed, "stretch {stretch} at {px}px");
+        }
+    }
+}
+
+#[test]
 fn baked_subset_unescapes_the_char_literal() {
     // Trimming the quotes off the literal's source text would put `\`, `u`, `{`, `0`, `b` in the
     // subset and leave the degree sign out.

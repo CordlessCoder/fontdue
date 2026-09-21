@@ -353,7 +353,7 @@ pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32
         metrics.width.checked_mul(3).expect("stretched raster width overflow")
     };
     canvas.resize(raster_width, metrics.height);
-    canvas.draw(&glyph, scale * stretch, scale, offset_x, offset_y);
+    canvas.draw(&glyph, scale * stretch, scale, offset_x * stretch, offset_y);
     metrics
 }
 

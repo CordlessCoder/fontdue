@@ -61,6 +61,38 @@ fn subpixel_raster_has_three_columns_per_pixel() {
 }
 
 #[test]
+fn subpixel_triplet_average_matches_grayscale() {
+    let font = Font::from_bytes(
+        &include_bytes!("../resources/fonts/Roboto-Regular.ttf")[..],
+        FontSettings::default(),
+    )
+    .unwrap();
+    for character in ['B', 'D', 'E', 'F'] {
+        for px in [12.0, 32.0, 64.0] {
+            let mut raster = fontdue::raster::Raster::empty();
+            let (gray_metrics, gray_bitmap) = font.rasterize(&mut raster, character, px);
+            let gray = gray_bitmap.collect::<Vec<u8>>();
+            let (subpixel_metrics, subpixel_bitmap) = font.rasterize_subpixel(&mut raster, character, px);
+            let subpixel = subpixel_bitmap.collect::<Vec<u8>>();
+
+            assert_eq!(subpixel_metrics.width, gray_metrics.width, "{character} at {px}px");
+            assert_eq!(subpixel_metrics.height, gray_metrics.height, "{character} at {px}px");
+            let mut max_diff = 0.0f32;
+            let mut total_diff = 0.0f32;
+            for (gray, rgb) in gray.iter().zip(subpixel.chunks_exact(3)) {
+                let average = ((u16::from(rgb[0]) + u16::from(rgb[1]) + u16::from(rgb[2]) + 1) / 3) as f32;
+                let diff = (average - f32::from(*gray)).abs();
+                max_diff = max_diff.max(diff);
+                total_diff += diff;
+            }
+            let mean_diff = total_diff / gray.len() as f32;
+            assert!(max_diff <= 1.0, "{character} at {px}px max diff {max_diff}");
+            assert!(mean_diff < 0.1, "{character} at {px}px mean diff {mean_diff}");
+        }
+    }
+}
+
+#[test]
 fn baked_subset_unescapes_the_char_literal() {
     // Trimming the quotes off the literal's source text would put `\`, `u`, `{`, `0`, `b` in the
     // subset and leave the degree sign out.

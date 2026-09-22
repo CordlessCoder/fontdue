@@ -1,7 +1,7 @@
 use crate::FontResult;
 pub use crate::fontrepr::FontRepr;
 use crate::math::{Geometry, Line};
-use crate::platform::{as_i32, ceil, floor, fract, is_negative};
+use crate::platform::{as_i32, as_i32_unchecked, ceil, floor, fract, is_negative};
 use crate::raster::Raster;
 use crate::table::{TableKern, load_gsub};
 use crate::unicode;
@@ -318,11 +318,11 @@ fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch:
     let width = ceil(bounds.width + offset_x);
     let height = ceil(bounds.height + offset_y);
     let stretched_width = width * stretch;
-    // `as_i32` saturates, and every later stage trusts the dimensions it produces: `resize` sizes
-    // the buffer from them and `add` indexes it with `get_unchecked_mut`. A px large enough to
-    // saturate the width while the height truncated to zero sized the buffer at three floats and
-    // then wrote past it. A range check rejects that, and rejects NaN, infinite and negative px
-    // with it, because none of those compare inside the range.
+    // Every later stage trusts these dimensions: `resize` sizes the buffer from them and `add`
+    // indexes it with `get_unchecked_mut`. A px large enough to saturate the width while the
+    // height truncates to zero would size the buffer at three floats and then write past it. The
+    // range check rejects that, and rejects NaN, infinite and negative px with it, because none
+    // of those compare inside the range. It is also what makes the conversions below sound.
     assert!(
         (-MAX_DIMENSION..=MAX_DIMENSION).contains(&xmin)
             && (-MAX_DIMENSION..=MAX_DIMENSION).contains(&ymin)
@@ -332,10 +332,11 @@ fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch:
         "px out of range: this glyph at scale {scale} does not fit i32"
     );
     let metrics = Metrics {
-        xmin: as_i32(xmin),
-        ymin: as_i32(ymin),
-        width: as_i32(width) as usize,
-        height: as_i32(height) as usize,
+        // SAFETY: the range check above bounds all four inside `i32` and rejects NaN.
+        xmin: unsafe { as_i32_unchecked(xmin) },
+        ymin: unsafe { as_i32_unchecked(ymin) },
+        width: unsafe { as_i32_unchecked(width) } as usize,
+        height: unsafe { as_i32_unchecked(height) } as usize,
         advance_width: scale * glyph.advance_width,
         advance_height: scale * glyph.advance_height,
         bounds,

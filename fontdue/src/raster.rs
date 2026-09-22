@@ -77,7 +77,14 @@ impl<'a> Raster<'a> {
                 // the resize covers whatever the largest glyph so far grew the buffer to, which
                 // is work every smaller glyph after it pays for nothing.
                 a.clear();
-                a.resize(len, 0.0);
+                a.reserve(len);
+                // SAFETY: `reserve` made room for `len` elements, `write_bytes` initialises all of
+                // them, and all-zero bits are `0.0`. Unlike `resize`, this is a `memset` at every
+                // opt-level; at `opt-level = "s"` `resize` is a store loop.
+                unsafe {
+                    core::ptr::write_bytes(a.as_mut_ptr(), 0, len);
+                    a.set_len(len);
+                }
             }
             RasterBuffer::Borrowed(a) => {
                 a[..len].fill(0.0);

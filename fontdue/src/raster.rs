@@ -293,6 +293,62 @@ impl BitmapIter<'_> {
     /// Four pixels in one go: the running total is serial, the four conversions are not. Written
     /// out rather than looped, because at `opt-level = "s"` a loop here is not unrolled, and the
     /// conversions then cannot overlap the next addition.
+    #[cfg(target_arch = "xtensa")]
+    #[inline(always)]
+    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u8; BLOCK] {
+        let (c0, c1, c2, c3): (u32, u32, u32, u32);
+        // Same operations per pixel as the portable form, in the same order for the running total,
+        // with each pixel's conversion placed in the stall slots of the next addition.
+        // SAFETY: reads the four floats `deltas` points to and nothing else; every result is clamped
+        // to 255.0 before `utrunc.s`.
+        unsafe {
+            core::arch::asm!(
+                "lsi {d0}, {p}, 0",
+                "lsi {d1}, {p}, 4",
+                "lsi {d2}, {p}, 8",
+                "lsi {d3}, {p}, 12",
+                "add.s {d0}, {h}, {d0}",
+                "add.s {d1}, {d0}, {d1}",
+                "abs.s {t0}, {d0}",
+                "add.s {d2}, {d1}, {d2}",
+                "abs.s {t1}, {d1}",
+                "add.s {h}, {d2}, {d3}",
+                "mul.s {t0}, {t0}, {k}",
+                "abs.s {t2}, {d2}",
+                "mul.s {t1}, {t1}, {k}",
+                "abs.s {t3}, {h}",
+                "mul.s {t2}, {t2}, {k}",
+                "rfr {c0}, {t0}",
+                "mul.s {t3}, {t3}, {k}",
+                "rfr {c1}, {t1}",
+                "minu {c0}, {c0}, {lim}",
+                "rfr {c2}, {t2}",
+                "minu {c1}, {c1}, {lim}",
+                "rfr {c3}, {t3}",
+                "wfr {t0}, {c0}",
+                "minu {c2}, {c2}, {lim}",
+                "wfr {t1}, {c1}",
+                "minu {c3}, {c3}, {lim}",
+                "wfr {t2}, {c2}",
+                "utrunc.s {c0}, {t0}, 0",
+                "wfr {t3}, {c3}",
+                "utrunc.s {c1}, {t1}, 0",
+                "utrunc.s {c2}, {t2}, 0",
+                "utrunc.s {c3}, {t3}, 0",
+                p = in(reg) deltas.as_ptr(),
+                lim = in(reg) 255f32.to_bits(),
+                k = in(freg) 255.9f32,
+                h = inout(freg) *height,
+                d0 = out(freg) _, d1 = out(freg) _, d2 = out(freg) _, d3 = out(freg) _,
+                t0 = out(freg) _, t1 = out(freg) _, t2 = out(freg) _, t3 = out(freg) _,
+                c0 = out(reg) c0, c1 = out(reg) c1, c2 = out(reg) c2, c3 = out(reg) c3,
+                options(pure, readonly, nostack),
+            );
+        }
+        [c0 as u8, c1 as u8, c2 as u8, c3 as u8]
+    }
+
+    #[cfg(not(target_arch = "xtensa"))]
     #[inline(always)]
     fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u8; BLOCK] {
         let h0 = *height + deltas[0];

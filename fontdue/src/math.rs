@@ -264,18 +264,18 @@ impl Line {
     }
 
     #[inline(always)]
-    pub(crate) fn raster_parts(&self) -> (f32x4, f32x4, f32x4) {
+    pub(crate) fn raster_parts(&self) -> (f32x4, [i32; 2], f32x4) {
         let (x0, y0, x1, y1) = self.coords.copied();
         let [tdx, tdy] = self.params;
         let (x_start_nudge, x_first_adj) = if x1 >= x0 {
-            (0, 1.0)
+            (0, 1)
         } else {
-            (1, 0.0)
+            (1, 0)
         };
         let (y_start_nudge, y_first_adj) = if y1 >= y0 {
-            (0, 1.0)
+            (0, 1)
         } else {
-            (1, 0.0)
+            (1, 0)
         };
         let x_end_nudge = if x1 > x0 {
             1
@@ -289,7 +289,7 @@ impl Line {
         };
         (
             f32x4::new_u32(x_start_nudge, y_start_nudge, x_end_nudge, y_end_nudge),
-            f32x4::new(x_first_adj, y_first_adj, 0.0, 0.0),
+            [x_first_adj, y_first_adj],
             f32x4::new(tdx, tdy, x1 - x0, y1 - y0),
         )
     }
@@ -515,7 +515,7 @@ mod tests {
         let (nudge, adjustment, params) = line.raster_parts();
         let (x_start, y_start, x_end, y_end) = nudge.copied();
         assert_eq!((x_start.to_bits(), y_start.to_bits(), x_end.to_bits(), y_end.to_bits()), (0, 0, 0, 1));
-        assert_eq!(adjustment.copied(), (1.0, 1.0, 0.0, 0.0));
+        assert_eq!(adjustment, [1, 1]);
         assert_eq!(params.copied(), (f32::MAX, 0.5, 0.0, 2.0));
     }
 }

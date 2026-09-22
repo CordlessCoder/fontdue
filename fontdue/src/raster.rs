@@ -116,8 +116,9 @@ impl<'a> Raster<'a> {
                 RasterBuffer::Owned(a) => a.as_mut_slice(),
                 RasterBuffer::Borrowed(a) => a,
             };
-            *a.get_unchecked_mut(index) += height - m;
-            *a.get_unchecked_mut(index + 1) += m;
+            let cell = a.as_mut_ptr().add(index);
+            *cell += height - m;
+            *cell.add(1) += m;
         }
 
         // This is safe but slow.
@@ -127,16 +128,16 @@ impl<'a> Raster<'a> {
     }
 
     #[inline(always)]
-    fn v_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: f32x4) {
+    fn v_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: [i32; 2]) {
         let (x0, y0, _, y1) = coords.copied();
-        let temp = coords.sub_integer(nudge).trunc();
-        let (start_x, start_y, end_x, end_y) = temp.copied();
-        let (_, mut target_y, _, _) = (temp + adjustment).copied();
+        let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
+        let mut target_y = (start_y + adjustment[1]) as f32;
         let sy = copysign(1f32, y1 - y0);
+        let w = self.w as i32;
         let mut y_prev = y0;
-        let mut index = index_of(start_x + start_y * self.w as f32);
-        let index_y_inc = index_of(copysign(self.w as f32, sy));
-        let mut dist = index_of(abs(start_y - end_y));
+        let mut index = start_x + start_y * w;
+        let index_y_inc = with_sign_of(w, y1 - y0);
+        let mut dist = (start_y - end_y).abs();
         let mid_x = fract(x0);
         while dist > 0 {
             dist -= 1;
@@ -145,51 +146,52 @@ impl<'a> Raster<'a> {
             y_prev = target_y;
             target_y += sy;
         }
-        self.add(index_of(end_x + end_y * self.w as f32) as usize, y_prev - y1, mid_x);
+        self.add((end_x + end_y * w) as usize, y_prev - y1, mid_x);
     }
 
     #[inline(always)]
-    fn m_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: f32x4, params: f32x4) {
+    fn m_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: [i32; 2], params: f32x4) {
         let (x0, y0, x1, y1) = coords.copied();
-        let temp = coords.sub_integer(nudge).trunc();
-        let (start_x, start_y, end_x, end_y) = temp.copied();
+        let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
         let (tdx, tdy, dx, dy) = params.copied();
-        let (mut target_x, mut target_y, _, _) = (temp + adjustment).copied();
-        let sx = copysign(1f32, tdx);
-        let sy = copysign(1f32, tdy);
-        let mut tmx = tdx * (target_x - x0);
-        let mut tmy = tdy * (target_y - y0);
+        // The next column and row edge to cross. They are whole numbers, kept as integers so the
+        // loop holds two fewer floats; converting one where it is used is exact.
+        let mut target_x = start_x + adjustment[0];
+        let mut target_y = start_y + adjustment[1];
+        let step_x = with_sign_of(1, tdx);
+        let step_y = with_sign_of(1, tdy);
+        let mut tmx = tdx * (target_x as f32 - x0);
+        let mut tmy = tdy * (target_y as f32 - y0);
         let tdx = abs(tdx);
         let tdy = abs(tdy);
+        let w = self.w as i32;
         let mut x_prev = x0;
         let mut y_prev = y0;
-        let mut index = index_of(start_x + start_y * self.w as f32);
-        let index_x_inc = index_of(sx);
-        let index_y_inc = index_of(copysign(self.w as f32, sy));
-        let mut dist = index_of(abs(start_x - end_x) + abs(start_y - end_y));
-        while dist > 0 {
-            dist -= 1;
+        let mut index = start_x + start_y * w;
+        let index_y_inc = step_y * w;
+        let dist = (start_x - end_x).unsigned_abs() + (start_y - end_y).unsigned_abs();
+        for _ in 0..dist {
             let prev_index = index;
             let y_next: f32;
             let x_next: f32;
             if tmx < tmy {
                 y_next = tmx * dy + y0; // FMA is not faster.
-                x_next = target_x;
+                x_next = target_x as f32;
                 tmx += tdx;
-                target_x += sx;
-                index += index_x_inc;
+                target_x += step_x;
+                index += step_x;
             } else {
-                y_next = target_y;
+                y_next = target_y as f32;
                 x_next = tmy * dx + x0;
                 tmy += tdy;
-                target_y += sy;
+                target_y += step_y;
                 index += index_y_inc;
             }
             self.add(prev_index as usize, y_prev - y_next, fract((x_prev + x_next) / 2.0));
             x_prev = x_next;
             y_prev = y_next;
         }
-        self.add(index_of(end_x + end_y * self.w as f32) as usize, y_prev - y1, fract((x_prev + x1) / 2.0));
+        self.add((end_x + end_y * w) as usize, y_prev - y1, fract((x_prev + x1) / 2.0));
     }
 
     #[inline(always)]
@@ -218,6 +220,21 @@ impl<'a> Raster<'a> {
 #[inline(always)]
 fn index_of(value: f32) -> i32 {
     unsafe { as_i32_unchecked(value) }
+}
+
+/// The pixel column and row each end of a line lies in, after the nudges. The loops keep indices
+/// and step counts as integers from here on and convert nothing back.
+#[inline(always)]
+fn cells(coords: f32x4, nudge: f32x4) -> (i32, i32, i32, i32) {
+    let (x0, y0, x1, y1) = coords.sub_integer(nudge).copied();
+    (index_of(x0), index_of(y0), index_of(x1), index_of(y1))
+}
+
+/// `magnitude`, negated when `sign`'s sign bit is set, as `copysign` does for floats.
+#[inline(always)]
+fn with_sign_of(magnitude: i32, sign: f32) -> i32 {
+    let mask = (sign.to_bits() as i32) >> 31;
+    (magnitude ^ mask) - mask
 }
 
 const BLOCK: usize = 4;

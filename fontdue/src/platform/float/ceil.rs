@@ -1,8 +1,12 @@
-// On Xtensa the bit-twiddling form below is about 36 instructions, too long to inline, so every
-// caller pays a windowed call for it. Below 2^23 in magnitude a float can have a fraction and fits
-// `i32`, so a truncating convert and a one-step correction are exact. At or above it, and for NaN
-// and infinity, `x` is already its own ceil. Copying `x`'s sign keeps -0.0 where libm keeps it.
-#[cfg(any(test, target_arch = "xtensa"))]
+// On Xtensa, `ceil.s` converts to an integer rounding toward plus infinity in one instruction.
+// The libm form below is about 36 instructions, too long to inline, so every caller would pay a
+// windowed call. Below 2^23 in magnitude a float can have a fraction and fits `i32`, so the
+// convert is exact. At or above it, and for NaN and infinity, `x` is already its own ceil.
+// Copying `x`'s sign keeps -0.0 where libm keeps it.
+//
+// `ceil_by_convert` is the same guard and sign copy with a portable truncating convert. The host
+// test checks it against libm; the asm itself is only checked on the target.
+#[cfg(test)]
 #[inline(always)]
 pub fn ceil_by_convert(x: f32) -> f32 {
     if super::abs(x) < 8388608.0 {
@@ -22,7 +26,19 @@ pub fn ceil_by_convert(x: f32) -> f32 {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub use ceil_by_convert as ceil;
+#[inline(always)]
+pub fn ceil(x: f32) -> f32 {
+    if super::abs(x) < 8388608.0 {
+        let i: i32;
+        // SAFETY: reads one float register and writes one address register, nothing else.
+        unsafe {
+            core::arch::asm!("ceil.s {0}, {1}, 0", out(reg) i, in(freg) x, options(pure, nomem, nostack))
+        };
+        super::copysign(i as f32, x)
+    } else {
+        x
+    }
+}
 
 // [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
 #[cfg(not(target_arch = "xtensa"))]

@@ -253,6 +253,7 @@ fn with_sign_of(magnitude: i32, sign: f32) -> i32 {
 const BLOCK: usize = 4;
 
 /// Running prefix sum over the area deltas, yielding one coverage byte per pixel.
+#[derive(Clone)]
 pub struct BitmapIter<'r> {
     /// Area deltas. `resize` keeps this at `w * h + 3`, and those three slots are what let the
     /// final block read four floats without running off the end. Shortening the slack breaks this

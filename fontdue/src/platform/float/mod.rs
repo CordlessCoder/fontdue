@@ -46,3 +46,19 @@ pub const fn flipsign(value: f32) -> f32 {
 pub const fn copysign(value: f32, sign: f32) -> f32 {
     f32::from_bits((value.to_bits() & 0x7fffffff) | (sign.to_bits() & 0x80000000))
 }
+
+/// `a * b + c`. On Xtensa this is one fused `madd.s` with a single rounding, so results there can
+/// differ from other targets by one ulp. Everywhere else it rounds twice, since a fused form is not
+/// guaranteed to be a single instruction there.
+#[cfg(target_arch = "xtensa")]
+#[inline(always)]
+pub fn mul_add(a: f32, b: f32, c: f32) -> f32 {
+    core::f32::math::mul_add(a, b, c)
+}
+
+/// `a * b + c`, rounded twice. See the Xtensa form.
+#[cfg(not(target_arch = "xtensa"))]
+#[inline(always)]
+pub fn mul_add(a: f32, b: f32, c: f32) -> f32 {
+    a * b + c
+}

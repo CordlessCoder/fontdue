@@ -5,7 +5,7 @@
  */
 
 use crate::GlyphRef;
-use crate::platform::{abs, as_i32_unchecked, copysign, f32x4};
+use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, mul_add};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
@@ -182,14 +182,14 @@ impl<'a> Raster<'a> {
             let y_next: f32;
             let x_next: f32;
             if tmx < tmy {
-                y_next = tmx * dy + y0; // FMA is not faster.
+                y_next = mul_add(tmx, dy, y0);
                 x_next = target_x as f32;
                 tmx += tdx;
                 target_x += step_x;
                 index += step_x;
             } else {
                 y_next = target_y as f32;
-                x_next = tmy * dx + x0;
+                x_next = mul_add(tmy, dx, x0);
                 tmy += tdy;
                 target_y += step_y;
                 index += index_y_inc;

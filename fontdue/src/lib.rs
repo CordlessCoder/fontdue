@@ -3,7 +3,7 @@
 //! This is a no_std crate, but still requires the alloc crate.
 
 #![cfg_attr(all(not(test), not(feature = "std"), feature = "hashbrown"), no_std)]
-#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch))]
+#![cfg_attr(target_arch = "xtensa", feature(asm_experimental_arch, core_float_math))]
 #![allow(dead_code)]
 #![allow(clippy::style)]
 #![allow(clippy::complexity)]

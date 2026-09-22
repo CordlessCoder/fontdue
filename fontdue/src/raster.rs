@@ -269,30 +269,45 @@ pub struct BitmapIter<'r> {
 }
 
 impl BitmapIter<'_> {
-    /// Folds one delta into the running total and returns its coverage byte.
+    /// The coverage byte for a running total.
     #[inline(always)]
-    fn step(height: &mut f32, delta: f32) -> u8 {
-        *height += delta;
-        let coverage = abs(*height) * 255.9;
-        // Written as `< 255.0` rather than `> 255.0` so a NaN fails the comparison and lands on
-        // 255.0. `abs` covers the lower bound, so the conversion below is total for every input
-        // and needs no argument about what the geometry can produce. Both forms cost the same.
-        let coverage = if coverage < 255.0 {
-            coverage
-        } else {
-            255.0
-        };
+    fn coverage(height: f32) -> u8 {
+        let coverage = abs(height) * 255.9;
+        // The clamp to 255.0 is an integer `min` on the bits, which has no branch. `abs` leaves
+        // `coverage` non-negative or NaN. Non-negative floats order as their bits do, and every NaN
+        // pattern is above 255.0's bits, so a NaN lands on 255.0 as well. That makes the
+        // conversion below total for every input, with no argument about what the geometry can
+        // produce.
+        let coverage = f32::from_bits(coverage.to_bits().min(255f32.to_bits()));
         // SAFETY: `coverage` is in `[0.0, 255.0]` by the clamp above.
         unsafe { coverage.to_int_unchecked::<u8>() }
     }
 
-    /// Computes the next four bytes in one go. Spreading the float dependency chain over four
-    /// pixels is what makes `next` cheap enough for `collect`.
+    /// Folds one delta into the running total and returns its coverage byte.
+    #[inline(always)]
+    fn step(height: &mut f32, delta: f32) -> u8 {
+        *height += delta;
+        Self::coverage(*height)
+    }
+
+    /// Four pixels in one go: the running total is serial, the four conversions are not. Written
+    /// out rather than looped, because at `opt-level = "s"` a loop here is not unrolled, and the
+    /// conversions then cannot overlap the next addition.
+    #[inline(always)]
+    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u8; BLOCK] {
+        let h0 = *height + deltas[0];
+        let h1 = h0 + deltas[1];
+        let h2 = h1 + deltas[2];
+        let h3 = h2 + deltas[3];
+        *height = h3;
+        [Self::coverage(h0), Self::coverage(h1), Self::coverage(h2), Self::coverage(h3)]
+    }
+
+    /// Computes the next four bytes.
     #[inline(always)]
     fn refill(&mut self) {
-        for i in 0..BLOCK {
-            self.block[i] = Self::step(&mut self.height, self.a[self.pos + i]);
-        }
+        let deltas = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
+        self.block = Self::block(&mut self.height, deltas);
         self.pos += BLOCK;
         self.block_pos = 0;
     }
@@ -328,7 +343,16 @@ impl Iterator for BitmapIter<'_> {
             self.block_pos += 1;
             self.remaining -= 1;
         }
-        for &delta in &self.a[self.pos..self.pos + self.remaining] {
+        let deltas = &self.a[self.pos..self.pos + self.remaining];
+        let mut blocks = deltas.chunks_exact(BLOCK);
+        for chunk in &mut blocks {
+            let [c0, c1, c2, c3] = Self::block(&mut self.height, chunk.try_into().unwrap());
+            acc = f(acc, c0);
+            acc = f(acc, c1);
+            acc = f(acc, c2);
+            acc = f(acc, c3);
+        }
+        for &delta in blocks.remainder() {
             acc = f(acc, Self::step(&mut self.height, delta));
         }
         acc
@@ -342,5 +366,67 @@ impl FusedIterator for BitmapIter<'_> {}
 impl ExactSizeIterator for BitmapIter<'_> {
     fn len(&self) -> usize {
         self.remaining
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn iter(a: &[f32], len: usize) -> BitmapIter<'_> {
+        BitmapIter {
+            a,
+            pos: 0,
+            remaining: len,
+            height: 0.0,
+            block: [0; BLOCK],
+            block_pos: BLOCK,
+        }
+    }
+
+    /// The integer clamp in `coverage` against the float comparison it replaced, NaN included.
+    #[test]
+    fn coverage_matches_the_float_clamp() {
+        let float_clamp = |height: f32| {
+            let coverage = abs(height) * 255.9;
+            let coverage = if coverage < 255.0 {
+                coverage
+            } else {
+                255.0
+            };
+            unsafe { coverage.to_int_unchecked::<u8>() }
+        };
+        let special =
+            [0.0, -0.0, 1.0, -1.0, 0.9965, 0.99648, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN];
+        for h in special.into_iter().chain((0..=u32::MAX).step_by(4099).map(f32::from_bits)) {
+            assert_eq!(BitmapIter::coverage(h), float_clamp(h), "height {h:e}");
+        }
+    }
+
+    /// `fold` has its own blocking and remainder, separate from `next`'s, and must yield the same
+    /// bytes: for every length mod 4, after `next` has taken part of a block, and for totals that
+    /// overshoot the clamp or go NaN.
+    #[test]
+    fn fold_matches_next() {
+        let deltas: Vec<f32> = (0..40)
+            .map(|i| match i {
+                17 => f32::NAN,
+                23 => -f32::NAN,
+                _ => ((i * 37 % 11) as f32 - 5.0) * 0.23,
+            })
+            .collect();
+        for len in 0..=deltas.len() - 3 {
+            let a = &deltas[..len + 3];
+            let by_next: Vec<u8> = iter(a, len).collect();
+            for taken in 0..=len.min(6) {
+                let mut it = iter(a, len);
+                let mut by_fold: Vec<u8> = it.by_ref().take(taken).collect();
+                by_fold = it.fold(by_fold, |mut v, c| {
+                    v.push(c);
+                    v
+                });
+                assert_eq!(by_fold, by_next, "len {len}, {taken} taken through next first");
+            }
+        }
     }
 }

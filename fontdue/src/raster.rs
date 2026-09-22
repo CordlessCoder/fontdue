@@ -211,8 +211,8 @@ impl<'a> Raster<'a> {
             pos: 0,
             remaining: self.w * self.h,
             height: 0.0,
-            block: [0; BLOCK],
-            block_pos: BLOCK,
+            block: 0,
+            block_left: 0,
         }
     }
 }
@@ -263,9 +263,11 @@ pub struct BitmapIter<'r> {
     remaining: usize,
     /// Coverage total accumulated up to `pos`.
     height: f32,
-    block: [u8; BLOCK],
-    /// Next byte to yield from `block`; `BLOCK` once it is spent.
-    block_pos: usize,
+    /// The current block's unread bytes, next one lowest. Packed rather than an array indexed by
+    /// position, so the iterator's state can stay in registers while a `for` loop drives `next`.
+    block: u32,
+    /// Bytes of `block` not yet yielded.
+    block_left: usize,
 }
 
 impl BitmapIter<'_> {
@@ -290,12 +292,12 @@ impl BitmapIter<'_> {
         Self::coverage(*height)
     }
 
-    /// Four pixels in one go: the running total is serial, the four conversions are not. Written
-    /// out rather than looped, because at `opt-level = "s"` a loop here is not unrolled, and the
-    /// conversions then cannot overlap the next addition.
+    /// Four pixels in one go, each at most 255. The running total is serial, the four conversions
+    /// are not. Written out rather than looped, because at `opt-level = "s"` a loop here is not
+    /// unrolled, and the conversions then cannot overlap the next addition.
     #[cfg(target_arch = "xtensa")]
     #[inline(always)]
-    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u8; BLOCK] {
+    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u32; BLOCK] {
         let (c0, c1, c2, c3): (u32, u32, u32, u32);
         // Same operations per pixel as the portable form, in the same order for the running total,
         // with each pixel's conversion placed in the stall slots of the next addition.
@@ -345,27 +347,34 @@ impl BitmapIter<'_> {
                 options(pure, readonly, nostack),
             );
         }
-        [c0 as u8, c1 as u8, c2 as u8, c3 as u8]
+        // SAFETY: `minu` against 255.0's bits before each `utrunc.s` bounds every result by 255.
+        unsafe { core::hint::assert_unchecked(c0 <= 255 && c1 <= 255 && c2 <= 255 && c3 <= 255) };
+        [c0, c1, c2, c3]
     }
 
     #[cfg(not(target_arch = "xtensa"))]
     #[inline(always)]
-    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u8; BLOCK] {
+    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u32; BLOCK] {
         let h0 = *height + deltas[0];
         let h1 = h0 + deltas[1];
         let h2 = h1 + deltas[2];
         let h3 = h2 + deltas[3];
         *height = h3;
-        [Self::coverage(h0), Self::coverage(h1), Self::coverage(h2), Self::coverage(h3)]
+        [h0, h1, h2, h3].map(|h| Self::coverage(h) as u32)
     }
 
     /// Computes the next four bytes.
     #[inline(always)]
     fn refill(&mut self) {
-        let deltas = self.a[self.pos..self.pos + BLOCK].try_into().unwrap();
-        self.block = Self::block(&mut self.height, deltas);
+        debug_assert!(self.pos + BLOCK <= self.a.len());
+        // SAFETY: `next` refills only while pixels remain, so `pos < w * h`, and `resize` keeps `a`
+        // at `w * h + 3` floats. The four from `pos` are therefore in bounds.
+        let deltas = unsafe { &*(self.a.as_ptr().add(self.pos) as *const [f32; BLOCK]) };
+        let [c0, c1, c2, c3] = Self::block(&mut self.height, deltas);
+        // Each is at most 255, so the fields do not overlap.
+        self.block = c0 | c1 << 8 | c2 << 16 | c3 << 24;
         self.pos += BLOCK;
-        self.block_pos = 0;
+        self.block_left = BLOCK;
     }
 }
 
@@ -377,11 +386,12 @@ impl Iterator for BitmapIter<'_> {
         if self.remaining == 0 {
             return None;
         }
-        if self.block_pos == BLOCK {
+        if self.block_left == 0 {
             self.refill();
         }
-        let v = self.block[self.block_pos];
-        self.block_pos += 1;
+        let v = self.block as u8;
+        self.block >>= 8;
+        self.block_left -= 1;
         self.remaining -= 1;
         Some(v)
     }
@@ -394,19 +404,20 @@ impl Iterator for BitmapIter<'_> {
         F: FnMut(B, Self::Item) -> B,
     {
         let mut acc = init;
-        while self.remaining > 0 && self.block_pos < BLOCK {
-            acc = f(acc, self.block[self.block_pos]);
-            self.block_pos += 1;
+        while self.remaining > 0 && self.block_left > 0 {
+            acc = f(acc, self.block as u8);
+            self.block >>= 8;
+            self.block_left -= 1;
             self.remaining -= 1;
         }
         let deltas = &self.a[self.pos..self.pos + self.remaining];
         let mut blocks = deltas.chunks_exact(BLOCK);
         for chunk in &mut blocks {
             let [c0, c1, c2, c3] = Self::block(&mut self.height, chunk.try_into().unwrap());
-            acc = f(acc, c0);
-            acc = f(acc, c1);
-            acc = f(acc, c2);
-            acc = f(acc, c3);
+            acc = f(acc, c0 as u8);
+            acc = f(acc, c1 as u8);
+            acc = f(acc, c2 as u8);
+            acc = f(acc, c3 as u8);
         }
         for &delta in blocks.remainder() {
             acc = f(acc, Self::step(&mut self.height, delta));
@@ -435,8 +446,8 @@ mod tests {
             pos: 0,
             remaining: len,
             height: 0.0,
-            block: [0; BLOCK],
-            block_pos: BLOCK,
+            block: 0,
+            block_left: 0,
         }
     }
 

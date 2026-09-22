@@ -5,7 +5,7 @@
  */
 
 use crate::GlyphRef;
-use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, fract};
+use crate::platform::{abs, as_i32_unchecked, copysign, f32x4};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 
@@ -138,7 +138,7 @@ impl<'a> Raster<'a> {
         let mut index = start_x + start_y * w;
         let index_y_inc = with_sign_of(w, y1 - y0);
         let mut dist = (start_y - end_y).abs();
-        let mid_x = fract(x0);
+        let mid_x = fract_of(x0);
         while dist > 0 {
             dist -= 1;
             self.add(index as usize, y_prev - target_y, mid_x);
@@ -187,11 +187,11 @@ impl<'a> Raster<'a> {
                 target_y += step_y;
                 index += index_y_inc;
             }
-            self.add(prev_index as usize, y_prev - y_next, fract((x_prev + x_next) / 2.0));
+            self.add(prev_index as usize, y_prev - y_next, fract_of((x_prev + x_next) / 2.0));
             x_prev = x_next;
             y_prev = y_next;
         }
-        self.add((end_x + end_y * w) as usize, y_prev - y1, fract((x_prev + x1) / 2.0));
+        self.add((end_x + end_y * w) as usize, y_prev - y1, fract_of((x_prev + x1) / 2.0));
     }
 
     #[inline(always)]
@@ -214,7 +214,7 @@ impl<'a> Raster<'a> {
 ///
 /// `draw` is only ever reached through `rasterize_inner`, which sizes the raster from
 /// `metrics_raw` and then scales every coordinate into it. Every value converted here is a pixel
-/// index or a step count inside those bounds, so the unchecked convert has its precondition. This
+/// coordinate inside those bounds, so the unchecked convert has its precondition. This
 /// is the same trust `add` already places in the caller, and the notice at the top of the file is
 /// about exactly this.
 #[inline(always)]
@@ -228,6 +228,12 @@ fn index_of(value: f32) -> i32 {
 fn cells(coords: f32x4, nudge: f32x4) -> (i32, i32, i32, i32) {
     let (x0, y0, x1, y1) = coords.sub_integer(nudge).copied();
     (index_of(x0), index_of(y0), index_of(x1), index_of(y1))
+}
+
+/// The fractional part of a coordinate inside the raster, through the same unchecked convert.
+#[inline(always)]
+fn fract_of(value: f32) -> f32 {
+    value - index_of(value) as f32
 }
 
 /// `magnitude`, negated when `sign`'s sign bit is set, as `copysign` does for floats.

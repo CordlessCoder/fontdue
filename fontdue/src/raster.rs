@@ -135,7 +135,7 @@ impl<'a> Raster<'a> {
     }
 
     #[inline(always)]
-    fn v_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: [i32; 2]) {
+    fn v_line(&mut self, coords: f32x4, nudge: [u32; 4], adjustment: [i32; 2]) {
         let (x0, y0, _, y1) = coords.copied();
         let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
         let mut target_y = (start_y + adjustment[1]) as f32;
@@ -157,7 +157,7 @@ impl<'a> Raster<'a> {
     }
 
     #[inline(always)]
-    fn m_line(&mut self, coords: f32x4, nudge: f32x4, adjustment: [i32; 2], params: f32x4) {
+    fn m_line(&mut self, coords: f32x4, nudge: [u32; 4], adjustment: [i32; 2], params: f32x4) {
         let (x0, y0, x1, y1) = coords.copied();
         let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
         let (tdx, tdy, dx, dy) = params.copied();
@@ -231,10 +231,16 @@ fn index_of(value: f32) -> i32 {
 
 /// The pixel column and row each end of a line lies in, after the nudges. The loops keep indices
 /// and step counts as integers from here on and convert nothing back.
+///
+/// A nudge of 1 steps a coordinate down to the next float by subtracting one from its bits. The
+/// nudges stay integers throughout: as `f32` bit patterns they were a choice between two float
+/// constants, which LLVM at opt-level 2 and above turns into a constant-pool table that the Xtensa
+/// backend fails to select.
 #[inline(always)]
-fn cells(coords: f32x4, nudge: f32x4) -> (i32, i32, i32, i32) {
-    let (x0, y0, x1, y1) = coords.sub_integer(nudge).copied();
-    (index_of(x0), index_of(y0), index_of(x1), index_of(y1))
+fn cells(coords: f32x4, nudge: [u32; 4]) -> (i32, i32, i32, i32) {
+    let (x0, y0, x1, y1) = coords.copied();
+    let step = |v: f32, n: u32| index_of(f32::from_bits(v.to_bits().wrapping_sub(n)));
+    (step(x0, nudge[0]), step(y0, nudge[1]), step(x1, nudge[2]), step(y1, nudge[3]))
 }
 
 /// The fractional part of a coordinate inside the raster, through the same unchecked convert.

@@ -15,22 +15,15 @@ pub fn as_i32(value: f32) -> i32 {
     unsafe { _mm_cvtss_si32(_mm_set_ss(value)) }
 }
 
+/// Truncates toward zero, on every target. `as_i32` does not: its x86 SIMD form rounds to
+/// nearest.
+///
 /// # Safety
 ///
 /// `value` must be finite and truncate into `i32`. Xtensa has no saturating float-to-int
 /// instruction, so `as i32` there costs 21 instructions against 4 for the raw convert; this is
 /// the variant the raster loop uses, and it is the only caller that can state the bound.
-#[cfg(target_arch = "xtensa")]
 #[inline(always)]
 pub unsafe fn as_i32_unchecked(value: f32) -> i32 {
     unsafe { value.to_int_unchecked() }
-}
-
-/// # Safety
-///
-/// `value` must be finite and truncate into `i32`.
-#[cfg(not(target_arch = "xtensa"))]
-#[inline(always)]
-pub unsafe fn as_i32_unchecked(value: f32) -> i32 {
-    as_i32(value)
 }

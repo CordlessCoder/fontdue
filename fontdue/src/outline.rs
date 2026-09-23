@@ -1,9 +1,10 @@
 //! Glyphs as the raster draws them: contours of points.
 //!
-//! The raster writes without bounds checks, so everything it draws carries a promise that every
-//! point lies inside the glyph's bounds. Glyphs `Font` outlines keep it by construction. Points
-//! stored elsewhere, such as the macro's, promise it through [`PathGlyph::new`], and sources that
-//! decode their own outlines promise it by implementing [`OutlineSource`].
+//! The raster writes without bounds checks, and an upright glyph is drawn without clamping, so
+//! every glyph carries a promise that every point lies inside its bounds. Glyphs `Font` outlines
+//! keep it by construction. Points stored elsewhere, such as the macro's, promise it through
+//! [`PathGlyph::new`], and sources that decode their own outlines promise it by implementing
+//! [`OutlineSource`].
 
 use crate::raster::Sink;
 use crate::{Glyph, OutlineBounds};
@@ -36,13 +37,13 @@ pub enum PathEvent {
     LineTo([f32; 2]),
 }
 
-/// A glyph source that draws its own outlines, such as a decoder that streams them.
+/// A glyph source that produces its own outlines, such as a decoder that streams them.
 ///
 /// # Safety
 ///
-/// For every glyph, every point `draw` passes to the sink must lie inside `[0, width] x
-/// [0, height]` of the bounds `info` returns for that glyph, and `info` must return the same
-/// bounds on every call. Every coordinate must be zero or at least [`SMALLEST_COORDINATE`].
+/// For every glyph, every point `visit` passes must lie inside `[0, width] x [0, height]` of the
+/// bounds `info` returns for that glyph, and `info` must return the same bounds on every call.
+/// Every coordinate must be zero or at least [`SMALLEST_COORDINATE`].
 ///
 /// The raster writes without bounds checks. A point outside the bounds writes out of bounds, and
 /// so can a line walk whose reciprocals are wrong, which the second rule prevents: it keeps every
@@ -51,23 +52,18 @@ pub enum PathEvent {
 pub unsafe trait OutlineSource {
     fn info(&self, glyph: u16) -> OutlineInfo;
 
-    /// Passes the glyph's contours to `sink` through [`Sink::move_to`] and [`Sink::line_to`].
-    /// Segments with no vertical extent belong in them too: the upright sink skips them, and a
-    /// transformed draw needs them to close each contour.
-    fn draw(&self, glyph: u16, sink: &mut Sink<'_, '_>);
-
-    /// Passes the outline `draw` passes to `f`, for the transformed draw. It clamps what it draws
-    /// into the raster, so these points carry no safety requirement.
+    /// Passes the glyph's contours to `f`. Segments with no vertical extent belong in them too:
+    /// the upright draw skips them, and a transformed draw needs them to close each contour.
     fn visit(&self, glyph: u16, f: &mut dyn FnMut(PathEvent));
 }
 
 /// An [`OutlineSource`] whose outline also comes out of an iterator, which is what the generic
-/// [`crate::rasterize_source`] draws from. `GlyphRef` and dynamic dispatch use `draw`, since an
+/// [`crate::rasterize_source`] draws from. `GlyphRef` and dynamic dispatch use `visit`, since an
 /// associated iterator type would have to be named in `dyn OutlineSource`.
 ///
 /// # Safety
 ///
-/// For every glyph, `points` must yield the outline `draw` passes, under the same rules.
+/// For every glyph, `points` must yield the outline `visit` passes, under the same rules.
 pub unsafe trait PathSource: OutlineSource {
     type Points<'a>: Iterator<Item = PathEvent>
     where
@@ -161,10 +157,13 @@ pub(crate) fn each_contour<'p>(
 /// before the previous one ends the walk, as in [`each_contour`].
 #[derive(Clone)]
 pub(crate) struct PathEvents<'p> {
+    /// The points after the current contour.
     points: &'p [[f32; 2]],
     contours: core::slice::Iter<'p, u32>,
-    next: usize,
-    end: usize,
+    /// The index in the glyph's points of the first of `points`.
+    start: usize,
+    /// The current contour's points not yet yielded.
+    rest: core::slice::Iter<'p, [f32; 2]>,
 }
 
 impl<'p> PathEvents<'p> {
@@ -173,8 +172,8 @@ impl<'p> PathEvents<'p> {
         PathEvents {
             points,
             contours: contours.iter(),
-            next: 0,
-            end: 0,
+            start: 0,
+            rest: [].iter(),
         }
     }
 }
@@ -184,22 +183,22 @@ impl Iterator for PathEvents<'_> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<PathEvent> {
-        if self.next < self.end {
-            let point = self.points[self.next];
-            self.next += 1;
+        if let Some(&point) = self.rest.next() {
             return Some(PathEvent::LineTo(point));
         }
         loop {
             let end = *self.contours.next()? as usize;
-            if end > self.points.len() || end < self.next {
+            let Some((contour, after)) =
+                end.checked_sub(self.start).and_then(|len| self.points.split_at_checked(len))
+            else {
                 self.contours = [].iter();
                 return None;
-            }
-            if end > self.next {
-                let point = self.points[self.next];
-                self.next += 1;
-                self.end = end;
-                return Some(PathEvent::MoveTo(point));
+            };
+            self.points = after;
+            self.start = end;
+            if let Some((&first, rest)) = contour.split_first() {
+                self.rest = rest.iter();
+                return Some(PathEvent::MoveTo(first));
             }
         }
     }
@@ -264,7 +263,7 @@ impl<'a> GlyphRef<'a> {
     pub(crate) fn draw(&self, sink: &mut Sink<'_, '_>) {
         match self.outline {
             Outline::Path(points, contours) => sink.contours(points, contours),
-            Outline::Source(source, glyph) => source.draw(glyph, sink),
+            Outline::Source(source, glyph) => sink.source(source, glyph),
         }
     }
 }

@@ -213,15 +213,6 @@ unsafe impl fontdue::OutlineSource for ReplayedFont {
         }
     }
 
-    fn draw(&self, glyph: u16, sink: &mut fontdue::raster::Sink<'_, '_>) {
-        for event in fontdue::PathSource::points(self, glyph) {
-            match event {
-                fontdue::PathEvent::MoveTo(p) => sink.move_to(p),
-                fontdue::PathEvent::LineTo(p) => sink.line_to(p),
-            }
-        }
-    }
-
     fn visit(&self, glyph: u16, f: &mut dyn FnMut(fontdue::PathEvent)) {
         for event in fontdue::PathSource::points(self, glyph) {
             f(event);
@@ -229,7 +220,7 @@ unsafe impl fontdue::OutlineSource for ReplayedFont {
     }
 }
 
-// SAFETY: the same outline `draw` passes, which lies inside the halved bounds.
+// SAFETY: the same outline `visit` passes, which lies inside the halved bounds.
 unsafe impl fontdue::PathSource for ReplayedFont {
     type Points<'a> = std::vec::IntoIter<fontdue::PathEvent>;
 

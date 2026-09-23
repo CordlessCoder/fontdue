@@ -20,6 +20,7 @@ pub mod layout;
 #[doc(hidden)]
 pub mod math;
 pub mod outline;
+mod path;
 mod platform;
 pub mod raster;
 pub mod store;
@@ -31,9 +32,10 @@ pub use crate::font::*;
 pub use crate::outline::{
     GlyphRef, OutlineInfo, OutlineSource, PathEvent, PathGlyph, PathSource, SMALLEST_COORDINATE,
 };
+pub use crate::path::{Transform, TransformedMetrics, rasterize_path};
 pub use crate::transform::{
-    PenOffsets, Transform, TransformedMetrics, rasterize_source_transformed,
-    rasterize_source_transformed_indexed, rasterize_transformed, transformed_raster_capacity,
+    PenOffsets, rasterize_source_transformed, rasterize_source_transformed_indexed, rasterize_transformed,
+    transformed_raster_capacity,
 };
 
 #[cfg(feature = "hashbrown")]

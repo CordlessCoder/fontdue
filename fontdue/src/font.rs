@@ -5,7 +5,7 @@ use crate::outline::{GlyphRef, OutlineInfo, PathSource};
 use crate::platform::{
     abs, as_i32_unchecked, ceil, ceil_i32_unchecked, floor, floor_i32_unchecked, fract, is_negative,
 };
-use crate::raster::{Raster, Sink};
+use crate::raster::{Lines, Raster, Sink};
 use crate::table::{TableKern, load_gsub};
 use crate::unicode;
 use crate::{HashMap, HashSet};
@@ -449,9 +449,9 @@ fn rasterize_with(
     // for the shipped paths; it stops the general form from being wrong.
     // SAFETY: `metrics_raw_stretched` checked this product is in [0, MAX_DIMENSION].
     let raster_width = unsafe { ceil_i32_unchecked(metrics.width as f32 * stretch) } as usize;
-    canvas.resize(raster_width, metrics.height);
+    let lines = Lines::new(canvas, raster_width, metrics.height);
     let scale = scale * info.unit;
-    draw(&mut Sink::new(canvas, scale * stretch, scale, offset_x * stretch, offset_y));
+    draw(&mut Sink::new(lines, scale * stretch, scale, offset_x * stretch, offset_y));
     metrics
 }
 

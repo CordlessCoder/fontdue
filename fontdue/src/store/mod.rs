@@ -666,16 +666,6 @@ unsafe impl crate::OutlineSource for Store<'_> {
         }
     }
 
-    #[inline]
-    fn draw(&self, glyph: u16, sink: &mut crate::raster::Sink<'_, '_>) {
-        for event in self.points(glyph) {
-            match event {
-                crate::PathEvent::MoveTo(p) => sink.move_to(p),
-                crate::PathEvent::LineTo(p) => sink.line_to(p),
-            }
-        }
-    }
-
     fn visit(&self, glyph: u16, f: &mut dyn FnMut(crate::PathEvent)) {
         for event in self.points(glyph) {
             f(event);
@@ -683,7 +673,7 @@ unsafe impl crate::OutlineSource for Store<'_> {
     }
 }
 
-// SAFETY: `points` yields exactly what `draw` passes to the sink.
+// SAFETY: `points` yields exactly what `visit` passes.
 unsafe impl crate::PathSource for Store<'_> {
     type Points<'s>
         = Points<'s, 's, Trusted>

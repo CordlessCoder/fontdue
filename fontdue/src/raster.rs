@@ -1,8 +1,7 @@
-/* Notice to anyone that wants to repurpose the raster for your library:
- * Please don't reuse this raster. Fontdue's raster is very unsafe, with nuanced invariants that
- * need to be accounted for. Fontdue sanitizes the input that the raster will consume to ensure it
- * is safe. Please be aware of this.
- */
+//! The raster and its line walk. The walk writes without bounds checks: `Lines::line` is the one
+//! way in, and its contract is what keeps the writes inside the buffer. Everything else in the
+//! crate reaches it through sized rasters and placed or clamped points;
+//! [`rasterize_path`](crate::rasterize_path) is the safe way to fill a path.
 
 use crate::math::Point;
 
@@ -124,26 +123,83 @@ impl<'a> Raster<'a> {
     }
 }
 
-/// Float-to-int for the line loops.
-///
-/// Lines are only drawn through a `Sink`. Upright, `font::rasterize_with` makes it for a raster
-/// sized from `metrics_raw`, and every glyph kind promises its points lie inside the bounds those
-/// metrics came from (see `outline`). Transformed, `transform::rasterize_with` sizes the raster
-/// from the transformed points and clamps every point into it before `Sink::edge`. Either way
-/// every value converted here is a pixel coordinate inside the raster, so the unchecked convert
-/// has its precondition. This is the same trust `add` already places in the caller, and the
-/// notice at the top of the file is about exactly this.
+/// Float-to-int for the line loops. Every value converted here is a pixel coordinate inside the
+/// raster, by `Lines::line`'s contract, so the unchecked convert has its precondition.
 #[inline(always)]
 fn index_of(value: f32) -> i32 {
     unsafe { as_i32_unchecked(value) }
 }
 
-/// Where an [`OutlineSource`](crate::OutlineSource) sends a glyph's contours. Only the raster
-/// makes one, sized and scaled for the glyph being drawn.
-pub struct Sink<'s, 'b> {
+/// A raster being filled: fontdue's rasterizer core, taking lines in pixels with no checks. Every
+/// glyph and path is drawn through one.
+///
+/// Draw every segment of a closed outline with [`line`](Lines::line), then drop the `Lines` and
+/// read coverage from [`Raster::get_bitmap_iter`]. Pixels are filled by the nonzero rule, with
+/// partial coverage at the edges.
+pub struct Lines<'s, 'b> {
+    cells: Cells,
+    _raster: PhantomData<&'s mut Raster<'b>>,
+}
+
+impl<'s, 'b> Lines<'s, 'b> {
+    /// Resizes `raster` to `width` by `height` pixels, all empty.
+    ///
+    /// # Panics
+    ///
+    /// If `width * height + 3` exceeds `i32::MAX`, or the raster borrows a slice too short for it.
+    #[inline(always)]
+    pub fn new(raster: &'s mut Raster<'b>, width: usize, height: usize) -> Self {
+        raster.resize(width, height);
+        Lines::of(raster)
+    }
+
+    /// Lines into `raster` at the size it has.
+    #[inline(always)]
+    pub(crate) fn of(raster: &'s mut Raster<'b>) -> Self {
+        let w = raster.w as i32;
+        #[cfg(debug_assertions)]
+        let len = raster.w * raster.h + 3;
+        let ptr = match &mut raster.a {
+            RasterBuffer::Owned(a) => a.as_mut_ptr(),
+            RasterBuffer::Borrowed(a) => a.as_mut_ptr(),
+        };
+        Lines {
+            cells: Cells {
+                ptr,
+                w,
+                #[cfg(debug_assertions)]
+                len,
+            },
+            _raster: PhantomData,
+        }
+    }
+
+    /// Adds the segment from `from` to `to`, in pixels with y down.
+    ///
+    /// # Safety
+    ///
+    /// Both points must lie inside `[0, width] x [0, height]`, and in each axis the two coordinates
+    /// must be equal or differ by at least `f32::MIN_POSITIVE`. Every coordinate being zero or at
+    /// least 2^-100 is enough for the second. The walk writes without bounds checks, and the
+    /// reciprocals that steer it are only accurate for normal deltas.
+    #[inline(always)]
+    pub unsafe fn line(&mut self, from: [f32; 2], to: [f32; 2]) {
+        self.cells.edge(Point::new(from[0], from[1]), Point::new(to[0], to[1]));
+    }
+
+    /// [`line`](Lines::line) for points already in the walk's type.
+    #[inline(always)]
+    pub(crate) unsafe fn edge(&mut self, from: Point, to: Point) {
+        self.cells.edge(from, to);
+    }
+}
+
+/// A glyph's points on their way to the raster: scaled and offset into it, with the previous
+/// point kept for the next segment.
+pub(crate) struct Sink<'s, 'b> {
     cells: Cells,
     place: Place,
-    /// Where the next `line_to` starts, placed.
+    /// Where the next segment starts, placed.
     last: Point,
     /// Whether segments need `placed`'s guards: set when the scale or an offset is too small for
     /// the sources' coordinate rule to keep placed deltas normal.
@@ -163,7 +219,7 @@ struct Cells {
 }
 
 /// Source units to raster space. Scalars, not the `f32x4`s the walk takes: read back from memory
-/// in a source's out-of-line `draw`, duplicated lanes are separate loads and separate live
+/// in a `dyn` source's `visit` closure, duplicated lanes are separate loads and separate live
 /// registers.
 #[derive(Clone, Copy)]
 struct Place {
@@ -181,28 +237,18 @@ impl Place {
 }
 
 impl<'s, 'b> Sink<'s, 'b> {
+    /// Sources' points go to `lines` scaled and then offset. The raster must be sized so that
+    /// every point the glyph's source promises lands inside it.
     #[inline(always)]
     pub(crate) fn new(
-        raster: &'s mut Raster<'b>,
+        lines: Lines<'s, 'b>,
         scale_x: f32,
         scale_y: f32,
         offset_x: f32,
         offset_y: f32,
     ) -> Self {
-        let w = raster.w as i32;
-        #[cfg(debug_assertions)]
-        let len = raster.w * raster.h + 3;
-        let ptr = match &mut raster.a {
-            RasterBuffer::Owned(a) => a.as_mut_ptr(),
-            RasterBuffer::Borrowed(a) => a.as_mut_ptr(),
-        };
         Sink {
-            cells: Cells {
-                ptr,
-                w,
-                #[cfg(debug_assertions)]
-                len,
-            },
+            cells: lines.cells,
             place: Place {
                 scale_x,
                 scale_y,
@@ -216,27 +262,6 @@ impl<'s, 'b> Sink<'s, 'b> {
                 && safe_offset(offset_y)),
             _raster: PhantomData,
         }
-    }
-
-    /// Starts a contour at `point`, in the source's point units.
-    #[inline(always)]
-    pub fn move_to(&mut self, point: [f32; 2]) {
-        self.last = self.place.apply(point);
-    }
-
-    /// Draws the segment from the previous point to `point`, or skips it when it has no vertical
-    /// extent. The points must meet [`OutlineSource`](crate::OutlineSource)'s contract, which the
-    /// source promised by implementing it: that is what makes the reciprocals, and so the line
-    /// walk, stay in bounds.
-    #[inline(always)]
-    pub fn line_to(&mut self, point: [f32; 2]) {
-        let placed = self.place.apply(point);
-        if self.guard {
-            self.cells.placed(self.last, placed);
-        } else {
-            self.cells.edge(self.last, placed);
-        }
-        self.last = placed;
     }
 
     /// Draws stored contours, holding the previous point in registers rather than in the sink.
@@ -258,6 +283,30 @@ impl<'s, 'b> Sink<'s, 'b> {
             let mut last = place.apply(first);
             for &point in rest {
                 let placed = place.apply(point);
+                cells.edge_with::<GUARD>(last, placed);
+                last = placed;
+            }
+        });
+    }
+
+    /// Draws a `dyn` source's outline through its `visit`, one call per point.
+    #[inline(always)]
+    pub(crate) fn source(&mut self, source: &dyn crate::OutlineSource, glyph: u16) {
+        if self.guard {
+            self.source_with::<true>(source, glyph)
+        } else {
+            self.source_with::<false>(source, glyph)
+        }
+    }
+
+    #[inline(always)]
+    fn source_with<const GUARD: bool>(&mut self, source: &dyn crate::OutlineSource, glyph: u16) {
+        let (cells, place) = (self.cells, self.place);
+        let mut last = self.last;
+        source.visit(glyph, &mut move |event| match event {
+            crate::PathEvent::MoveTo(p) => last = place.apply(p),
+            crate::PathEvent::LineTo(p) => {
+                let placed = place.apply(p);
                 cells.edge_with::<GUARD>(last, placed);
                 last = placed;
             }
@@ -289,13 +338,6 @@ impl<'s, 'b> Sink<'s, 'b> {
             }
         }
         self.last = last;
-    }
-
-    /// Draws a segment whose points are in raster space and inside it, as [`Cells::edge`]: every
-    /// coordinate must be zero or at least 2^-100, so the deltas are zero or normal.
-    #[inline(always)]
-    pub(crate) fn edge(&mut self, start: Point, end: Point) {
-        self.cells.edge(start, end);
     }
 }
 

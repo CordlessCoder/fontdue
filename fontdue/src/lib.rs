@@ -22,6 +22,7 @@ pub mod math;
 pub mod outline;
 mod platform;
 pub mod raster;
+pub mod store;
 mod table;
 mod unicode;
 

@@ -361,6 +361,26 @@ pub fn rasterize_source<S: SegmentSource + ?Sized>(
     })
 }
 
+/// `FontRepr::rasterize_indexed` over a source, generically, for fonts the macro backs with a
+/// store. `scale` is the font's `scale_factor(px)`.
+#[doc(hidden)]
+#[inline]
+pub fn rasterize_source_indexed<'r, S: SegmentSource + ?Sized>(
+    canvas: &'r mut Raster<'_>,
+    source: &S,
+    glyph: u16,
+    px: f32,
+    scale: f32,
+    stretch: f32,
+) -> (Metrics, crate::raster::BitmapIter<'r>) {
+    if px == 0.0 {
+        canvas.resize(0, 0);
+        return (Metrics::default(), canvas.get_bitmap_iter());
+    }
+    let metrics = rasterize_source(canvas, source, glyph, scale, stretch);
+    (metrics, canvas.get_bitmap_iter())
+}
+
 #[inline(always)]
 fn rasterize_with(
     canvas: &mut Raster<'_>,

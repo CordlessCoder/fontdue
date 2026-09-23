@@ -496,13 +496,16 @@ pub const MAX_CURVE_SEGMENTS: u32 = 1024;
 /// If `tolerance` is not positive.
 pub fn flatten<I: IntoIterator<Item = PathCommand>>(commands: I, tolerance: f32) -> Flatten<I::IntoIter> {
     assert!(tolerance > 0.0, "flatten tolerance must be positive");
+    let k = 0.75 / tolerance;
     Flatten {
         commands: commands.into_iter(),
-        tolerance,
+        bound: k * k,
         current: None,
         curve: [[0.0; 2]; 4],
         step: 0,
         steps: 0,
+        at: 0.0,
+        dt: 0.0,
     }
 }
 
@@ -510,12 +513,16 @@ pub fn flatten<I: IntoIterator<Item = PathCommand>>(commands: I, tolerance: f32)
 #[derive(Clone, Debug)]
 pub struct Flatten<I> {
     commands: I,
-    tolerance: f32,
+    /// `(3/4 / tolerance)^2`, for `segments`.
+    bound: f32,
     current: Option<[f32; 2]>,
     /// The curve being drawn, as a cubic, and how many of its `steps` lines are drawn.
     curve: [[f32; 2]; 4],
     step: u32,
     steps: u32,
+    /// `step` as a float, and `1 / steps`: the parameter is their product.
+    at: f32,
+    dt: f32,
 }
 
 impl<I> Flatten<I> {
@@ -526,8 +533,11 @@ impl<I> Flatten<I> {
             return PathEvent::LineTo(to);
         };
         self.curve = [from, c1, c2, to];
-        self.steps = segments(&self.curve, self.tolerance);
+        let (steps, whole) = segments(&self.curve, self.bound);
+        self.steps = steps;
         self.step = 0;
+        self.at = 0.0;
+        self.dt = 1.0 / whole;
         self.line()
     }
 
@@ -536,7 +546,8 @@ impl<I> Flatten<I> {
         if self.step == self.steps {
             return PathEvent::LineTo(self.curve[3]);
         }
-        let t = self.step as f32 / self.steps as f32;
+        self.at += 1.0;
+        let t = self.at * self.dt;
         let u = 1.0 - t;
         let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
         let [p0, p1, p2, p3] = self.curve;
@@ -546,23 +557,24 @@ impl<I> Flatten<I> {
 }
 
 /// Wang's formula for a cubic: uniform steps in the parameter, enough that no line is farther
-/// than `tolerance` from the curve, which is `3/4 * max |p[i] - 2 p[i+1] + p[i+2]| / n^2` at most.
-/// A quadratic raised to a cubic gets the count the quadratic's own formula gives.
-fn segments(p: &[[f32; 2]; 4], tolerance: f32) -> u32 {
+/// than the tolerance from the curve, which is `3/4 * max |p[i] - 2 p[i+1] + p[i+2]| / n^2` at
+/// most. So `n` is the least with `n^4 >= bound * max^2`, `bound` being `(3/4 / tolerance)^2`,
+/// found by counting up rather than by two square roots, which are software on some targets; the
+/// count costs a few multiplications per line the curve then draws. Returned as an integer and
+/// as a float. A quadratic raised to a cubic gets the count the quadratic's own formula gives.
+fn segments(p: &[[f32; 2]; 4], bound: f32) -> (u32, f32) {
     let second = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
         let (x, y) = (a[0] - 2.0 * b[0] + c[0], a[1] - 2.0 * b[1] + c[1]);
         x * x + y * y
     };
-    let m = sqrt(second(p[0], p[1], p[2]).max(second(p[1], p[2], p[3])));
-    let n = ceil(sqrt(0.75 * m / tolerance));
-    // NaN, from a non-finite point, fails the first test.
-    if !(n >= 1.0) {
-        1
-    } else if n < MAX_CURVE_SEGMENTS as f32 {
-        n as u32
-    } else {
-        MAX_CURVE_SEGMENTS
+    // NaN, from a non-finite point, fails the comparison at once and gets one line.
+    let target = bound * second(p[0], p[1], p[2]).max(second(p[1], p[2], p[3]));
+    let (mut n, mut whole) = (1, 1.0f32);
+    while n < MAX_CURVE_SEGMENTS && (whole * whole) * (whole * whole) < target {
+        n += 1;
+        whole += 1.0;
     }
+    (n, whole)
 }
 
 impl<I: Iterator<Item = PathCommand>> Iterator for Flatten<I> {
@@ -601,21 +613,26 @@ mod tests {
     #[test]
     fn curve_segments_follow_wangs_formula() {
         // A straight cubic with evenly spaced controls has no second difference: one line.
-        assert_eq!(segments(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], 0.01), 1);
-        // Second difference 12, so 0.75 * 12 / n^2 <= 0.1 needs n = 10; a quarter of the
-        // tolerance doubles it.
+        let n = |p: &[[f32; 2]; 4], tolerance: f32| segments(p, (0.75 / tolerance) * (0.75 / tolerance)).0;
+        assert_eq!(n(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], 0.01), 1);
+        // Second difference 12, so 0.75 * 12 / n^2 <= tolerance needs n = 10 at 0.09 and n = 20
+        // at a quarter of that; 9 needs 0.1111.
         let bend = [[0.0, 0.0], [0.0, 12.0], [0.0, 12.0], [0.0, 0.0]];
-        assert_eq!(segments(&bend, 0.09), 10);
-        assert_eq!(segments(&bend, 0.0225), 20);
-        assert_eq!(segments(&bend, 1e-9), super::MAX_CURVE_SEGMENTS);
-        assert_eq!(segments(&[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1);
-        assert_eq!(segments(&[[0.0, 0.0], [f32::INFINITY, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1024);
+        assert_eq!(n(&bend, 0.09), 10);
+        assert_eq!(n(&bend, 0.0225), 20);
+        assert_eq!(n(&bend, 0.111), 10);
+        assert_eq!(n(&bend, 0.1112), 9);
+        assert_eq!(n(&bend, 1e-9), super::MAX_CURVE_SEGMENTS);
+        assert_eq!(n(&[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1);
+        assert_eq!(n(&[[0.0, 0.0], [f32::INFINITY, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1024);
+        let (count, whole) = segments(&bend, (0.75 / 100.0) * (0.75 / 100.0));
+        assert_eq!((count, whole), (1, 1.0));
     }
 
     #[test]
     fn flatten_draws_curves_to_their_ends() {
         let quad = [PathCommand::MoveTo([0.0, 0.0]), PathCommand::QuadTo([10.0, 20.0], [20.0, 0.0])];
-        let events: Vec<_> = flatten(quad, 0.1).collect();
+        let events: Vec<_> = flatten(quad, 0.12).collect();
         assert_eq!(events[0], MoveTo([0.0, 0.0]));
         assert_eq!(*events.last().unwrap(), LineTo([20.0, 0.0]));
         // Every point is on the parabola y = 2x - x^2 / 10, and the middle one is its apex.

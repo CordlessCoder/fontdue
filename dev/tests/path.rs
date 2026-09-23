@@ -99,6 +99,47 @@ fn fills_by_the_nonzero_rule() {
     }
 }
 
+/// Overlapping squares wound the same way cut a hole under even-odd, and a pentagram's centre,
+/// wound twice, is empty. A reversed hole is a hole under either rule.
+#[test]
+fn fills_by_the_even_odd_rule() {
+    let even_odd = |path: &[PathEvent]| {
+        let mut canvas = Raster::empty();
+        let m = rasterize_path(&mut canvas, path.iter().copied(), Transform::IDENTITY, (0.0, 0.0));
+        let bitmap: Vec<u8> = canvas.get_bitmap_iter_even_odd().collect();
+        assert_eq!(bitmap.len(), m.width * m.height);
+        (m, bitmap)
+    };
+    let square = |x: f32, y: f32, s: f32| [[x, y], [x + s, y], [x + s, y + s], [x, y + s]];
+    let mut overlapping = polygon(&square(0.0, 0.0, 4.0));
+    overlapping.extend(polygon(&square(2.0, 2.0, 4.0)));
+    let (m, bitmap) = even_odd(&overlapping);
+    assert_eq!((m.width, m.height), (6, 6));
+    for (i, &c) in bitmap.iter().enumerate() {
+        let (x, y) = (i % 6, i / 6);
+        let inside = (x < 4 && y < 4) != (x >= 2 && y >= 2);
+        assert_eq!(c, u8::from(inside) * 255, "pixel {x}, {y}");
+    }
+
+    let mut ring = polygon(&square(0.0, 0.0, 6.0));
+    let mut hole = square(2.0, 2.0, 2.0);
+    hole.reverse();
+    ring.extend(polygon(&hole));
+    assert_eq!(even_odd(&ring).1, fill(&ring, Transform::IDENTITY, (0.0, 0.0)).1);
+
+    let star: Vec<[f32; 2]> = (0..5)
+        .map(|i| {
+            let a = std::f32::consts::TAU * (2 * i) as f32 / 5.0;
+            [20.0 + 20.0 * a.sin(), 20.0 - 20.0 * a.cos()]
+        })
+        .collect();
+    let (m, odd) = even_odd(&polygon(&star));
+    let (_, nonzero) = fill(&polygon(&star), Transform::IDENTITY, (0.0, 0.0));
+    let centre = |bitmap: &[u8]| bitmap[(m.height / 2) * m.width + m.width / 2];
+    assert_eq!((centre(&odd), centre(&nonzero)), (0, 255));
+    assert!(odd.iter().zip(&nonzero).all(|(&o, &n)| o <= n));
+}
+
 /// The safe fill and the unchecked core agree on a path already inside the raster.
 #[test]
 fn matches_lines() {

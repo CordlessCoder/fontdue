@@ -15,7 +15,7 @@ fn safe_scale(scale: f32) -> bool {
 fn safe_offset(offset: f32) -> bool {
     offset == 0.0 || offset >= f32::from_bits((127 - 100) << 23)
 }
-use crate::platform::{abs, as_i32_unchecked, f32x4, half_of, halve, mul_add, recip2};
+use crate::platform::{abs, as_i32_unchecked, f32x4, floor, half_of, halve, mul_add, recip2};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
@@ -107,8 +107,20 @@ impl<'a> Raster<'a> {
         }
     }
 
+    /// Coverage by the nonzero rule, which font outlines use.
     #[inline(always)]
     pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
+        self.get_bitmap_iter_with()
+    }
+
+    /// Coverage by the even-odd rule: where contours overlap, each overlap toggles coverage.
+    #[inline(always)]
+    pub fn get_bitmap_iter_even_odd<'r>(&'r self) -> BitmapIter<'r, EvenOdd> {
+        self.get_bitmap_iter_with()
+    }
+
+    #[inline(always)]
+    fn get_bitmap_iter_with<'r, R: FillRule>(&'r self) -> BitmapIter<'r, R> {
         BitmapIter {
             a: match &self.a {
                 RasterBuffer::Owned(a) => a,
@@ -119,6 +131,7 @@ impl<'a> Raster<'a> {
             height: 0.0,
             block: 0,
             block_left: 0,
+            _rule: PhantomData,
         }
     }
 }
@@ -754,9 +767,34 @@ fn with_sign_of(magnitude: i32, sign: f32) -> i32 {
 
 const BLOCK: usize = 4;
 
+/// How a pixel's accumulated winding area becomes coverage. Implemented by [`NonZero`] and
+/// [`EvenOdd`] only.
+pub trait FillRule: rule::Rule {}
+
+/// Covered where the winding number is not zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NonZero;
+
+/// Covered where the winding number is odd.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EvenOdd;
+
+impl FillRule for NonZero {}
+impl FillRule for EvenOdd {}
+
+mod rule {
+    pub trait Rule: Copy {
+        /// Four pixels' coverage, each at most 255, advancing the running total.
+        fn block(height: &mut f32, deltas: &[f32; super::BLOCK]) -> [u32; super::BLOCK];
+
+        /// One pixel's coverage, advancing the running total.
+        fn step(height: &mut f32, delta: f32) -> u8;
+    }
+}
+
 /// Running prefix sum over the area deltas, yielding one coverage byte per pixel.
 #[derive(Clone)]
-pub struct BitmapIter<'r> {
+pub struct BitmapIter<'r, R: FillRule = NonZero> {
     /// Area deltas. `resize` keeps this at `w * h + 3`, and those three slots are what let the
     /// final block read four floats without running off the end. Shortening the slack breaks this
     /// iterator before it breaks `Raster::add`.
@@ -771,9 +809,10 @@ pub struct BitmapIter<'r> {
     block: u32,
     /// Bytes of `block` not yet yielded.
     block_left: usize,
+    _rule: PhantomData<R>,
 }
 
-impl BitmapIter<'_> {
+impl NonZero {
     /// The coverage byte for a running total.
     #[inline(always)]
     fn coverage(height: f32) -> u8 {
@@ -787,17 +826,57 @@ impl BitmapIter<'_> {
         // SAFETY: `coverage` is in `[0.0, 255.0]` by the clamp above.
         unsafe { coverage.to_int_unchecked::<u8>() }
     }
+}
 
-    /// Folds one delta into the running total and returns its coverage byte.
+impl EvenOdd {
+    /// The running total folded into `[0, 1]`: its magnitude mod 2, reflected above 1. Infinite or
+    /// NaN totals give NaN, which `NonZero::coverage` maps to 255.
+    #[inline(always)]
+    fn coverage(height: f32) -> u8 {
+        let c = abs(height);
+        let c = c - 2.0 * floor(c * 0.5);
+        NonZero::coverage(if c > 1.0 {
+            2.0 - c
+        } else {
+            c
+        })
+    }
+}
+
+/// Four pixels through `coverage`. The running total is serial, the four conversions are not.
+/// Written out rather than looped, because at `opt-level = "s"` a loop here is not unrolled, and
+/// the conversions then cannot overlap the next addition.
+#[inline(always)]
+fn portable_block(height: &mut f32, deltas: &[f32; BLOCK], coverage: fn(f32) -> u8) -> [u32; BLOCK] {
+    let h0 = *height + deltas[0];
+    let h1 = h0 + deltas[1];
+    let h2 = h1 + deltas[2];
+    let h3 = h2 + deltas[3];
+    *height = h3;
+    [h0, h1, h2, h3].map(|h| coverage(h) as u32)
+}
+
+impl rule::Rule for EvenOdd {
+    #[inline(always)]
+    fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u32; BLOCK] {
+        portable_block(height, deltas, Self::coverage)
+    }
+
+    #[inline(always)]
+    fn step(height: &mut f32, delta: f32) -> u8 {
+        *height += delta;
+        Self::coverage(*height)
+    }
+}
+
+impl rule::Rule for NonZero {
     #[inline(always)]
     fn step(height: &mut f32, delta: f32) -> u8 {
         *height += delta;
         Self::coverage(*height)
     }
 
-    /// Four pixels in one go, each at most 255. The running total is serial, the four conversions
-    /// are not. Written out rather than looped, because at `opt-level = "s"` a loop here is not
-    /// unrolled, and the conversions then cannot overlap the next addition.
+    /// `portable_block` with `coverage`, hand-scheduled.
     #[cfg(target_arch = "xtensa")]
     #[inline(always)]
     fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u32; BLOCK] {
@@ -858,14 +937,11 @@ impl BitmapIter<'_> {
     #[cfg(not(target_arch = "xtensa"))]
     #[inline(always)]
     fn block(height: &mut f32, deltas: &[f32; BLOCK]) -> [u32; BLOCK] {
-        let h0 = *height + deltas[0];
-        let h1 = h0 + deltas[1];
-        let h2 = h1 + deltas[2];
-        let h3 = h2 + deltas[3];
-        *height = h3;
-        [h0, h1, h2, h3].map(|h| Self::coverage(h) as u32)
+        portable_block(height, deltas, Self::coverage)
     }
+}
 
+impl<R: FillRule> BitmapIter<'_, R> {
     /// Computes the next four bytes.
     #[inline(always)]
     fn refill(&mut self) {
@@ -873,7 +949,7 @@ impl BitmapIter<'_> {
         // SAFETY: `next` refills only while pixels remain, so `pos < w * h`, and `resize` keeps `a`
         // at `w * h + 3` floats. The four from `pos` are therefore in bounds.
         let deltas = unsafe { &*(self.a.as_ptr().add(self.pos) as *const [f32; BLOCK]) };
-        let [c0, c1, c2, c3] = Self::block(&mut self.height, deltas);
+        let [c0, c1, c2, c3] = R::block(&mut self.height, deltas);
         // Each is at most 255, so the fields do not overlap.
         self.block = c0 | c1 << 8 | c2 << 16 | c3 << 24;
         self.pos += BLOCK;
@@ -881,7 +957,7 @@ impl BitmapIter<'_> {
     }
 }
 
-impl Iterator for BitmapIter<'_> {
+impl<R: FillRule> Iterator for BitmapIter<'_, R> {
     type Item = u8;
 
     #[inline(always)]
@@ -916,14 +992,14 @@ impl Iterator for BitmapIter<'_> {
         let deltas = &self.a[self.pos..self.pos + self.remaining];
         let mut blocks = deltas.chunks_exact(BLOCK);
         for chunk in &mut blocks {
-            let [c0, c1, c2, c3] = Self::block(&mut self.height, chunk.try_into().unwrap());
+            let [c0, c1, c2, c3] = R::block(&mut self.height, chunk.try_into().unwrap());
             acc = f(acc, c0 as u8);
             acc = f(acc, c1 as u8);
             acc = f(acc, c2 as u8);
             acc = f(acc, c3 as u8);
         }
         for &delta in blocks.remainder() {
-            acc = f(acc, Self::step(&mut self.height, delta));
+            acc = f(acc, R::step(&mut self.height, delta));
         }
         acc
     }
@@ -932,8 +1008,8 @@ impl Iterator for BitmapIter<'_> {
         (self.remaining, Some(self.remaining))
     }
 }
-impl FusedIterator for BitmapIter<'_> {}
-impl ExactSizeIterator for BitmapIter<'_> {
+impl<R: FillRule> FusedIterator for BitmapIter<'_, R> {}
+impl<R: FillRule> ExactSizeIterator for BitmapIter<'_, R> {
     fn len(&self) -> usize {
         self.remaining
     }
@@ -943,7 +1019,7 @@ impl ExactSizeIterator for BitmapIter<'_> {
 mod tests {
     use super::*;
 
-    fn iter(a: &[f32], len: usize) -> BitmapIter<'_> {
+    fn iter<R: FillRule>(a: &[f32], len: usize) -> BitmapIter<'_, R> {
         BitmapIter {
             a,
             pos: 0,
@@ -951,6 +1027,7 @@ mod tests {
             height: 0.0,
             block: 0,
             block_left: 0,
+            _rule: PhantomData,
         }
     }
 
@@ -969,7 +1046,7 @@ mod tests {
         let special =
             [0.0, -0.0, 1.0, -1.0, 0.9965, 0.99648, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN];
         for h in special.into_iter().chain((0..=u32::MAX).step_by(4099).map(f32::from_bits)) {
-            assert_eq!(BitmapIter::coverage(h), float_clamp(h), "height {h:e}");
+            assert_eq!(NonZero::coverage(h), float_clamp(h), "height {h:e}");
         }
     }
 
@@ -985,11 +1062,16 @@ mod tests {
                 _ => ((i * 37 % 11) as f32 - 5.0) * 0.23,
             })
             .collect();
+        fold_matches_next_for::<NonZero>(&deltas);
+        fold_matches_next_for::<EvenOdd>(&deltas);
+    }
+
+    fn fold_matches_next_for<R: FillRule>(deltas: &[f32]) {
         for len in 0..=deltas.len() - 3 {
             let a = &deltas[..len + 3];
-            let by_next: Vec<u8> = iter(a, len).collect();
+            let by_next: Vec<u8> = iter::<R>(a, len).collect();
             for taken in 0..=len.min(6) {
-                let mut it = iter(a, len);
+                let mut it = iter::<R>(a, len);
                 let mut by_fold: Vec<u8> = it.by_ref().take(taken).collect();
                 by_fold = it.fold(by_fold, |mut v, c| {
                     v.push(c);
@@ -997,6 +1079,28 @@ mod tests {
                 });
                 assert_eq!(by_fold, by_next, "len {len}, {taken} taken through next first");
             }
+        }
+    }
+
+    /// Even-odd coverage of a running total: whole windings alternate between empty and covered,
+    /// and a fraction between them is the distance to the nearer even winding.
+    #[test]
+    fn even_odd_folds_windings() {
+        for (height, want) in [
+            (0.0, 0),
+            (1.0, 255),
+            (-1.0, 255),
+            (2.0, 0),
+            (-2.0, 0),
+            (3.0, 255),
+            (0.5, 127),
+            (1.5, 127),
+            (2.25, 63),
+            (-2.25, 63),
+            (f32::INFINITY, 255),
+            (f32::NAN, 255),
+        ] {
+            assert_eq!(EvenOdd::coverage(height), want, "height {height}");
         }
     }
 }

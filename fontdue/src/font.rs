@@ -142,6 +142,8 @@ impl LineMetrics {
 pub struct Glyph {
     pub(crate) v_lines: Vec<Line>,
     pub(crate) m_lines: Vec<Line>,
+    /// Lines with no vertical extent, which only a transformed draw uses.
+    pub(crate) h_lines: Vec<Line>,
     pub(crate) advance_width: f32,
     pub(crate) advance_height: f32,
     pub(crate) bounds: OutlineBounds,
@@ -154,6 +156,10 @@ impl Glyph {
 
     pub fn m_lines(&self) -> &[Line] {
         &self.m_lines
+    }
+
+    pub fn h_lines(&self) -> &[Line] {
+        &self.h_lines
     }
 
     pub fn bounds(&self) -> OutlineBounds {
@@ -174,6 +180,7 @@ impl Default for Glyph {
         Glyph {
             v_lines: Vec::new(),
             m_lines: Vec::new(),
+            h_lines: Vec::new(),
             advance_width: 0.0,
             advance_height: 0.0,
             bounds: OutlineBounds::default(),

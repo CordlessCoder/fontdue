@@ -259,7 +259,11 @@ impl Line {
                 } else {
                     1.0 / dx
                 },
-                1.0 / dy,
+                if dy == 0.0 {
+                    core::f32::MAX
+                } else {
+                    1.0 / dy
+                },
             ],
         }
     }
@@ -358,6 +362,7 @@ impl Line {
 pub struct Geometry {
     v_lines: Vec<Line>,
     m_lines: Vec<Line>,
+    h_lines: Vec<Line>,
     effective_bounds: AABB,
     start_point: Point,
     previous_point: Point,
@@ -458,6 +463,7 @@ impl Geometry {
         Geometry {
             v_lines: Vec::new(),
             m_lines: Vec::new(),
+            h_lines: Vec::new(),
             effective_bounds: AABB {
                 xmin: f32::MAX,
                 xmax: f32::MIN,
@@ -483,22 +489,43 @@ impl Geometry {
             }
             Self::recalculate_bounds(&mut self.effective_bounds, start.x, start.y);
             Self::recalculate_bounds(&mut self.effective_bounds, end.x, end.y);
+        } else if start.x.to_bits() != end.x.to_bits() {
+            // No area and no effect on the bounds upright; a transformed draw needs it to close
+            // the contour.
+            self.h_lines.push(Line::new(start, end));
         }
     }
 
     pub(crate) fn finalize(mut self, glyph: &mut Glyph) {
         if self.v_lines.is_empty() && self.m_lines.is_empty() {
             self.effective_bounds = AABB::default();
+            self.h_lines.clear();
         } else {
+            // Horizontal lines are left out of the bounds, so the upright glyph is unchanged, and
+            // clamped into them instead. A run of horizontal lines lies on one row and only its
+            // ends, which it shares with the contour's other lines, decide its area under any
+            // transform. Clamping moves every point along the row and none of those ends, and
+            // moves shared points alike, so each contour stays closed with the same area.
+            let b = self.effective_bounds;
+            self.h_lines.retain_mut(|l| {
+                let (x0, y0, x1, y1) = l.coords.copied();
+                let clamp = |x: f32, y: f32| Point::new(x.max(b.xmin).min(b.xmax), y.max(b.ymin).min(b.ymax));
+                let (start, end) = (clamp(x0, y0), clamp(x1, y1));
+                *l = Line::new(start, end);
+                start.x.to_bits() != end.x.to_bits()
+            });
             self.reverse_points = self.area > 0.0;
-            for line in self.v_lines.iter_mut().chain(self.m_lines.iter_mut()) {
+            for line in self.v_lines.iter_mut().chain(self.m_lines.iter_mut()).chain(self.h_lines.iter_mut())
+            {
                 line.reposition(self.effective_bounds, self.reverse_points);
             }
             self.v_lines.shrink_to_fit();
             self.m_lines.shrink_to_fit();
+            self.h_lines.shrink_to_fit();
         }
         glyph.v_lines = self.v_lines;
         glyph.m_lines = self.m_lines;
+        glyph.h_lines = self.h_lines;
         glyph.bounds = OutlineBounds {
             xmin: self.effective_bounds.xmin,
             ymin: self.effective_bounds.ymin,
@@ -535,6 +562,7 @@ mod tests {
         empty.finalize(&mut empty_glyph);
         assert!(empty_glyph.v_lines.is_empty());
         assert!(empty_glyph.m_lines.is_empty());
+        assert!(empty_glyph.h_lines.is_empty());
 
         let mut point = Geometry::new(32.0, 1000.0);
         point.move_to(10.0, 20.0);
@@ -543,6 +571,7 @@ mod tests {
         point.finalize(&mut point_glyph);
         assert!(point_glyph.v_lines.is_empty());
         assert!(point_glyph.m_lines.is_empty());
+        assert!(point_glyph.h_lines.is_empty());
     }
 
     #[test]

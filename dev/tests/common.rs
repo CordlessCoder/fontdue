@@ -208,7 +208,7 @@ unsafe impl fontdue::SegmentSource for ReplayedFont {
 
     fn segments(&self, glyph: u16) -> Self::Segments<'_> {
         let g = &self.0.internal_glyph_slice()[glyph as usize];
-        Box::new(g.v_lines().iter().chain(g.m_lines()).map(|line| {
+        Box::new(g.v_lines().iter().chain(g.m_lines()).chain(g.h_lines()).map(|line| {
             let (x0, y0, x1, y1) = line.coords().copied();
             [x0 / 2.0, y0 / 2.0, x1 / 2.0, y1 / 2.0]
         }))
@@ -316,8 +316,9 @@ fn store_check(words: &[u32]) -> Option<fontdue::store::Error> {
     fontdue::store::Store::new(view).err()
 }
 
-/// Every decoded point lies inside its glyph's bounds. The raster is sized from the bounds and
-/// writes without checks, so a point outside them would write out of bounds.
+/// Every decoded segment meets `OutlineSource`'s contract: its points lie inside its glyph's
+/// bounds, and its deltas are zero or normal. The raster is sized from the bounds and writes
+/// without checks, so a point outside them would write out of bounds.
 #[test]
 fn store_points_lie_inside_bounds() {
     use fontdue::store::Store;
@@ -331,7 +332,9 @@ fn store_points_lie_inside_bounds() {
             for (x, y) in [(x0, y0), (x1, y1)] {
                 assert!((0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y), "glyph {g}");
             }
-            assert_ne!(y0, y1, "glyph {g} yielded a segment with no vertical extent");
+            for d in [x1 - x0, y1 - y0] {
+                assert!(d == 0.0 || d.is_normal(), "glyph {g} yielded a delta the contract forbids");
+            }
         }
     }
 }
@@ -375,4 +378,60 @@ fn corrupt_stores_are_rejected() {
     let mut empty_model = words.clone();
     empty_model[2] = 0;
     assert_eq!(store_check(&empty_model), Some(Error::BadModel));
+}
+
+/// Adds each segment's start and subtracts its end, keyed by the point's bits. A set of closed
+/// contours leaves every count at zero.
+fn open_ends(segments: impl Iterator<Item = [f32; 4]>) -> usize {
+    let mut degree: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+    for [x0, y0, x1, y1] in segments {
+        *degree.entry((x0.to_bits(), y0.to_bits())).or_default() += 1;
+        *degree.entry((x1.to_bits(), y1.to_bits())).or_default() -= 1;
+    }
+    degree.values().filter(|&&d| d != 0).count()
+}
+
+/// A transformed draw gives horizontal edges vertical extent, so every source has to keep them:
+/// without them a contour is open and its coverage leaks along the rows it should close.
+#[test]
+fn every_glyph_is_closed_contours() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/fonts");
+    let mut horizontal = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if !matches!(path.extension().and_then(|e| e.to_str()), Some("ttf" | "otf")) {
+            continue;
+        }
+        let font = Font::from_bytes(std::fs::read(&path).unwrap(), FontSettings::default()).unwrap();
+        for (i, g) in font.internal_glyph_slice().iter().enumerate() {
+            let b = g.bounds();
+            for line in g.h_lines() {
+                let (x0, y0, x1, y1) = line.coords().copied();
+                assert!(y0 == y1 && x0 != x1, "{path:?} glyph {i}");
+                for (x, y) in [(x0, y0), (x1, y1)] {
+                    assert!(
+                        (0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y),
+                        "{path:?} glyph {i}"
+                    );
+                }
+            }
+            horizontal += g.h_lines().len();
+            let lines = g.v_lines().iter().chain(g.m_lines()).chain(g.h_lines());
+            let segments = lines.map(|l| {
+                let (x0, y0, x1, y1) = l.coords().copied();
+                [x0, y0, x1, y1]
+            });
+            assert_eq!(open_ends(segments), 0, "{path:?} glyph {i}");
+        }
+    }
+    assert!(horizontal > 0);
+
+    use fontdue::store::Store;
+    let words = encoded_roboto();
+    // SAFETY: as in `store_check`.
+    let view = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
+    let store = Store::new(view).unwrap();
+    for g in 0..store.glyph_count() {
+        assert_eq!(open_ends(store.lines(g)), 0, "store glyph {g}");
+    }
 }

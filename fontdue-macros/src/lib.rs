@@ -47,7 +47,8 @@ fn line_to_tokens(line: &fontdue::math::Line) -> proc_macro2::TokenStream {
     }
 }
 fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
-    let (v_lines, m_lines, bounds) = (glyph.v_lines(), glyph.m_lines(), glyph.bounds());
+    let (v_lines, m_lines, h_lines, bounds) =
+        (glyph.v_lines(), glyph.m_lines(), glyph.h_lines(), glyph.bounds());
     let (advance_width, advance_height) = (glyph.advance_width(), glyph.advance_height());
     let OutlineBounds {
         xmin,
@@ -58,12 +59,14 @@ fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
 
     let v_lines = v_lines.iter().map(line_to_tokens);
     let m_lines = m_lines.iter().map(line_to_tokens);
+    let h_lines = h_lines.iter().map(line_to_tokens);
     // SAFETY (of the emitted code): the lines and bounds are a `Glyph`'s that the font outlined.
     quote! {
         unsafe {
             ::fontdue::LineGlyph::new(
                 &[#(#v_lines),*],
                 &[#(#m_lines),*],
+                &[#(#h_lines),*],
                 ::fontdue::OutlineBounds {
                     xmin: #xmin,
                     ymin: #ymin,

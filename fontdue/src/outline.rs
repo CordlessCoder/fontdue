@@ -31,17 +31,17 @@ pub struct OutlineInfo {
 ///
 /// - have both endpoints inside `[0, width] x [0, height]` of the bounds `info` returns for that
 ///   glyph, and `info` must return the same bounds on every call;
-/// - have `y0 != y1`, since a segment with no vertical extent covers nothing and has no finite
-///   reciprocal;
-/// - have `x1 - x0` either zero or a normal float, and `y1 - y0` a normal float.
+/// - have `x1 - x0` and `y1 - y0` each either zero or a normal float.
 ///
 /// The raster writes without bounds checks. A point outside the bounds writes out of bounds, and
-/// so can a line walk whose reciprocals are wrong, which the last two rules prevent: the reciprocal
+/// so can a line walk whose reciprocals are wrong, which the second rule prevents: the reciprocal
 /// the raster uses at draw time on Xtensa is only exact to 1 ulp for normal values.
 pub unsafe trait OutlineSource {
     fn info(&self, glyph: u16) -> OutlineInfo;
 
-    /// Passes each of the glyph's segments to `sink`, in any order.
+    /// Passes each of the glyph's segments to `sink`, in any order. Segments with `y0 == y1`
+    /// belong in it too: the upright sink skips them, and a transformed draw needs them to close
+    /// each contour.
     fn draw(&self, glyph: u16, sink: &mut Sink<'_, '_>);
 }
 
@@ -61,12 +61,13 @@ pub unsafe trait SegmentSource: OutlineSource {
     fn segments(&self, glyph: u16) -> Self::Segments<'_>;
 }
 
-/// A glyph stored as lines, split into vertical lines and all others, as `Font` and the macro
-/// keep them.
+/// A glyph stored as lines, split into vertical, horizontal and all others, as `Font` and the
+/// macro keep them. The upright draw skips the horizontal ones.
 #[derive(Clone, Copy)]
 pub struct LineGlyph<'l> {
     v_lines: &'l [Line],
     m_lines: &'l [Line],
+    h_lines: &'l [Line],
     bounds: OutlineBounds,
     advance_width: f32,
     advance_height: f32,
@@ -77,9 +78,13 @@ impl<'l> LineGlyph<'l> {
     ///
     /// Every line's endpoints must lie inside `[0, width] x [0, height]` of `bounds`, and every
     /// line in `v_lines` must be vertical. The raster writes without bounds checks.
+    ///
+    /// Lines in `h_lines` should be horizontal, and horizontal lines belong nowhere else. That
+    /// is not needed for soundness: the upright draw leaves out every line in `h_lines`.
     pub const unsafe fn new(
         v_lines: &'l [Line],
         m_lines: &'l [Line],
+        h_lines: &'l [Line],
         bounds: OutlineBounds,
         advance_width: f32,
         advance_height: f32,
@@ -87,6 +92,7 @@ impl<'l> LineGlyph<'l> {
         LineGlyph {
             v_lines,
             m_lines,
+            h_lines,
             bounds,
             advance_width,
             advance_height,
@@ -98,7 +104,14 @@ impl<'l> LineGlyph<'l> {
         // SAFETY: `Font` outlines every `Glyph`, and `Geometry::finalize` positions its lines
         // inside the bounds it records and puts only vertical lines in `v_lines`.
         unsafe {
-            Self::new(&glyph.v_lines, &glyph.m_lines, glyph.bounds, glyph.advance_width, glyph.advance_height)
+            Self::new(
+                &glyph.v_lines,
+                &glyph.m_lines,
+                &glyph.h_lines,
+                glyph.bounds,
+                glyph.advance_width,
+                glyph.advance_height,
+            )
         }
     }
 
@@ -108,6 +121,10 @@ impl<'l> LineGlyph<'l> {
 
     pub fn m_lines(&self) -> &'l [Line] {
         self.m_lines
+    }
+
+    pub fn h_lines(&self) -> &'l [Line] {
+        self.h_lines
     }
 
     #[inline(always)]
@@ -130,7 +147,8 @@ pub struct GlyphRef<'a> {
 
 #[derive(Clone, Copy)]
 enum Outline<'a> {
-    Lines(&'a [Line], &'a [Line]),
+    /// Vertical, other and horizontal lines.
+    Lines(&'a [Line], &'a [Line], &'a [Line]),
     Source(&'a dyn OutlineSource, u16),
 }
 
@@ -157,7 +175,7 @@ impl<'a> GlyphRef<'a> {
     #[inline(always)]
     pub(crate) fn draw(&self, sink: &mut Sink<'_, '_>) {
         match self.outline {
-            Outline::Lines(v_lines, m_lines) => sink.lines(v_lines, m_lines),
+            Outline::Lines(v_lines, m_lines, _) => sink.lines(v_lines, m_lines),
             Outline::Source(source, glyph) => source.draw(glyph, sink),
         }
     }
@@ -168,7 +186,7 @@ impl<'l> From<LineGlyph<'l>> for GlyphRef<'l> {
     fn from(glyph: LineGlyph<'l>) -> Self {
         GlyphRef {
             info: glyph.info(),
-            outline: Outline::Lines(glyph.v_lines, glyph.m_lines),
+            outline: Outline::Lines(glyph.v_lines, glyph.m_lines, glyph.h_lines),
         }
     }
 }

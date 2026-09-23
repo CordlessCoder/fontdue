@@ -616,8 +616,8 @@ impl<'a> Store<'a> {
         f32::from_bits(self.record(glyph)[3])
     }
 
-    /// The glyph's segments, in contour order. Segments with no vertical extent are skipped, as
-    /// fontdue's `Geometry::push` skips them. A glyph index past the end yields nothing.
+    /// The glyph's segments, in contour order, including those with no vertical extent. A glyph
+    /// index past the end yields nothing.
     #[inline]
     pub fn lines(&self, glyph: u16) -> Lines<'_, 'a, Trusted> {
         self.lines_in(Trusted, glyph)
@@ -656,7 +656,7 @@ impl<'a> Store<'a> {
 // point to lie inside the glyph's size in grid units, which is what `grid_bounds` returns. The
 // trusted decode yields exactly those points. `new_unchecked` and `from_parts` move that
 // obligation to their callers. Points are whole grid units below 2^16, so every delta is zero or
-// a normal float, and the decoder skips steps with no vertical extent.
+// a normal float.
 unsafe impl crate::OutlineSource for Store<'_> {
     #[inline]
     fn info(&self, glyph: u16) -> crate::OutlineInfo {
@@ -717,7 +717,7 @@ impl<M: Mode> Iterator for Lines<'_, '_, M> {
         let steps_t = &s.steps;
         let (mut steps, mut shape, mut x, mut y) = (self.steps, self.shape, self.x, self.y);
         loop {
-            while steps > 0 {
+            if steps > 0 {
                 steps -= 1;
                 let (dx, dy, p) = step(&self.mode, words, shape, steps_t);
                 shape = p;
@@ -726,15 +726,11 @@ impl<M: Mode> Iterator for Lines<'_, '_, M> {
                 if !M::TRUSTED {
                     self.mode.require(x as u32 <= self.width && y as u32 <= self.height);
                 }
-                if dy != 0 {
-                    let (fx, fy) = (x as f32, y as f32);
-                    let seg = [self.fx, self.fy, fx, fy];
-                    (self.fx, self.fy) = (fx, fy);
-                    (self.steps, self.shape, self.x, self.y) = (steps, shape, x, y);
-                    return Some(seg);
-                }
-                // A step with no vertical extent still moves the point; the next segment starts there.
-                (self.fx, self.fy) = (x as f32, y as f32);
+                let (fx, fy) = (x as f32, y as f32);
+                let seg = [self.fx, self.fy, fx, fy];
+                (self.fx, self.fy) = (fx, fy);
+                (self.steps, self.shape, self.x, self.y) = (steps, shape, x, y);
+                return Some(seg);
             }
             if self.placements == 0 || self.mode.failed() {
                 (self.steps, self.shape, self.x, self.y) = (steps, shape, x, y);

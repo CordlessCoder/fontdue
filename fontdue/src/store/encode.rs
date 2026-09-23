@@ -357,7 +357,8 @@ pub fn chains(g: &Glyph, grid_shift: u8) -> (Vec<Vec<(i32, i32)>>, Bounds) {
     let segs: Vec<((f32, f32), (f32, f32))> = g
         .v_lines()
         .iter()
-        .chain(g.m_lines().iter())
+        .chain(g.m_lines())
+        .chain(g.h_lines())
         .map(|l| {
             let (a, b, c, d) = l.coords().copied();
             ((a, b), (c, d))

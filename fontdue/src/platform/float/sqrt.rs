@@ -1,5 +1,9 @@
 // [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+#[cfg(not(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "sse2",
+    feature = "simd"
+)))]
 pub fn sqrt(x: f32) -> f32 {
     const TINY: f32 = 1.0e-30;
 
@@ -85,7 +89,7 @@ pub fn sqrt(x: f32) -> f32 {
     f32::from_bits(ix as u32)
 }
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse2", feature = "simd"))]
 #[inline(always)]
 pub fn sqrt(value: f32) -> f32 {
     #[cfg(target_arch = "x86")]
@@ -93,5 +97,6 @@ pub fn sqrt(value: f32) -> f32 {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::*;
 
+    // SAFETY: compiled only where SSE2 is enabled.
     unsafe { _mm_cvtss_f32(_mm_sqrt_ss(_mm_set_ss(value))) }
 }

@@ -20,10 +20,7 @@ pub use trunc_by_convert as trunc;
 
 // [See license/rust-lang/libm] Copyright (c) 2018 Jorge Aparicio
 
-#[cfg(all(
-    not(target_arch = "xtensa"),
-    not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))
-))]
+#[cfg(not(target_arch = "xtensa"))]
 pub fn trunc(x: f32) -> f32 {
     let mut i: u32 = x.to_bits();
     let mut e: i32 = (i >> 23 & 0xff) as i32 - 0x7f + 9;
@@ -42,20 +39,9 @@ pub fn trunc(x: f32) -> f32 {
     f32::from_bits(i)
 }
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
-#[inline(always)]
-pub fn trunc(value: f32) -> f32 {
-    #[cfg(target_arch = "x86")]
-    use core::arch::x86::*;
-    #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::*;
-
-    unsafe { _mm_cvtss_f32(_mm_cvtepi32_ps(_mm_cvttps_epi32(_mm_set_ss(value)))) }
-}
-
 #[cfg(test)]
 mod tests {
-    /// The libm form, which is what `trunc` is on the host without SIMD.
+    /// The libm form, which is what `trunc` is off Xtensa.
     fn libm(x: f32) -> f32 {
         let mut i: u32 = x.to_bits();
         let mut e: i32 = (i >> 23 & 0xff) as i32 - 0x7f + 9;

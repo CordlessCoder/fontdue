@@ -655,9 +655,7 @@ mod tests {
                 advance_width: 0.0,
                 advance_height: 0.0,
             };
-            // Never -0: with -0 bounds too, the SIMD `fract` gives -0, which the guarded path
-            // then counts as negative, adding a whole column. Callers pass +0.
-            let offset = next() / 8.0 + 0.0;
+            let offset = next() / 8.0;
             let stretch = if next() < 0.0 {
                 3.0
             } else {

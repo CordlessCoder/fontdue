@@ -1,11 +1,21 @@
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+// SSE2 is baseline on x86_64 but not on every 32-bit x86 target, and calling its intrinsics where
+// the target does not enable it is undefined behaviour. Such a target gets the scalar forms.
+#[cfg(not(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "sse2",
+    feature = "simd"
+)))]
 mod simd_core;
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
+#[cfg(not(all(
+    any(target_arch = "x86", target_arch = "x86_64"),
+    target_feature = "sse2",
+    feature = "simd"
+)))]
 pub use simd_core::*;
 
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse2", feature = "simd"))]
 mod simd_x86;
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "sse2", feature = "simd"))]
 pub use simd_x86::*;
 
 mod float;
@@ -36,7 +46,7 @@ mod tests {
     fn platform_floor_test() {
         let mut y = -3.0;
         while y > -9.0 {
-            assert_eq!(ceil(y), f32::ceil(y));
+            assert_eq!(floor(y), f32::floor(y));
             y = f32::from_bits(f32::to_bits(y) + 1);
         }
 

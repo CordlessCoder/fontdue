@@ -366,6 +366,15 @@ fn at_most(n: usize) -> f32 {
 /// segment left of the raster covers the row as it would at `x = 0`, and one right of it covers
 /// none of it, as at `x = w`.
 fn clip(lines: &mut Lines<'_, '_>, mut p: (f32, f32), mut q: (f32, f32), w: f32, h: f32) {
+    let place = |(x, y): (f32, f32)| Point::new(clamp(x, w), clamp(y, h));
+    // NaN fails this, and takes the general path.
+    let inside = |(x, y): (f32, f32)| x >= 0.0 && x <= w && y >= 0.0 && y <= h;
+    if inside(p) && inside(q) {
+        // SAFETY: `clamp` puts both points inside the raster, each coordinate zero or at least
+        // 2^-100, and `at_most` keeps `w` and `h` within its size.
+        unsafe { lines.edge(place(p), place(q)) };
+        return;
+    }
     if (p.1 <= 0.0 && q.1 <= 0.0) || (p.1 >= h && q.1 >= h) {
         return;
     }
@@ -393,7 +402,6 @@ fn clip(lines: &mut Lines<'_, '_>, mut p: (f32, f32), mut q: (f32, f32), w: f32,
         }
     }
     points[n] = q;
-    let place = |(x, y): (f32, f32)| Point::new(clamp(x, w), clamp(y, h));
     let mut from = place(points[0]);
     for &point in &points[1..=n] {
         let to = place(point);

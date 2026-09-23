@@ -1,6 +1,6 @@
 use fontdue::raster::{Lines, Raster};
 use fontdue::PathEvent::{self, LineTo, MoveTo};
-use fontdue::{rasterize_path, Transform, TransformedMetrics};
+use fontdue::{flatten, rasterize_path, PathCommand, Transform, TransformedMetrics};
 
 fn polygon(points: &[[f32; 2]]) -> Vec<PathEvent> {
     let mut events = vec![MoveTo(points[0])];
@@ -185,4 +185,53 @@ fn empty_and_nan_paths_stay_in_bounds() {
 fn rejects_paths_too_large() {
     let far = f32::MAX;
     fill(&polygon(&[[0.0, 0.0], [far, 0.0], [far, far]]), Transform::IDENTITY, (0.0, 0.0));
+}
+
+/// A circle of radius `r` about `(r, r)` as four cubics, which stray from it by at most 0.03% of
+/// `r`.
+fn circle(r: f32) -> Vec<PathCommand> {
+    let k = 0.552_284_8 * r;
+    let (c, e) = (r, 2.0 * r);
+    vec![
+        PathCommand::MoveTo([c, 0.0]),
+        PathCommand::CubicTo([c + k, 0.0], [e, c - k], [e, c]),
+        PathCommand::CubicTo([e, c + k], [c + k, e], [c, e]),
+        PathCommand::CubicTo([c - k, e], [0.0, c + k], [0.0, c]),
+        PathCommand::CubicTo([0.0, c - k], [c - k, 0.0], [c, 0.0]),
+    ]
+}
+
+/// No chord of the flattened circle is farther from the circle than the tolerance, the circle's
+/// own error aside.
+#[test]
+fn flattened_curves_stay_within_tolerance() {
+    let r = 100.0f32;
+    for tolerance in [1.0, 0.1, 0.01] {
+        let mut points = vec![];
+        for e in flatten(circle(r), tolerance) {
+            let (MoveTo(p) | LineTo(p)) = e;
+            points.push(p);
+        }
+        let mut worst = 0.0f32;
+        for pair in points.windows(2) {
+            for i in 0..=8 {
+                let t = i as f32 / 8.0;
+                let x = pair[0][0] + t * (pair[1][0] - pair[0][0]) - r;
+                let y = pair[0][1] + t * (pair[1][1] - pair[0][1]) - r;
+                worst = worst.max(((x * x + y * y).sqrt() - r).abs());
+            }
+        }
+        assert!(worst <= tolerance + 0.0003 * r, "{worst} at tolerance {tolerance}");
+    }
+}
+
+#[test]
+fn fills_a_flattened_circle() {
+    let r = 20.0;
+    let mut canvas = Raster::empty();
+    let m = rasterize_path(&mut canvas, flatten(circle(r), 0.05), Transform::IDENTITY, (0.0, 0.0));
+    assert_eq!((m.x, m.y, m.width, m.height), (0, 0, 40, 40));
+    let area: f32 = canvas.get_bitmap_iter().map(|c| c as f32 / 255.0).sum();
+    let want = std::f32::consts::PI * r * r;
+    assert!((area - want).abs() < 0.005 * want, "{area} against {want}");
 }

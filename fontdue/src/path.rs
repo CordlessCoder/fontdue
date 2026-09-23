@@ -377,11 +377,169 @@ impl<I: Iterator<Item = PathEvent>> Iterator for Closed<I> {
     }
 }
 
+/// One step of a path with curves, for [`flatten`]. Points are in the path's own units, as for
+/// [`rasterize_path`].
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum PathCommand {
+    MoveTo([f32; 2]),
+    LineTo([f32; 2]),
+    /// A quadratic Bézier from the current point: its control point, then its end.
+    QuadTo([f32; 2], [f32; 2]),
+    /// A cubic Bézier from the current point: its two control points, then its end.
+    CubicTo([f32; 2], [f32; 2], [f32; 2]),
+}
+
+/// The most lines [`flatten`] draws for one curve.
+pub const MAX_CURVE_SEGMENTS: u32 = 1024;
+
+/// `commands` with every curve replaced by lines, for [`rasterize_path`]. No line strays more than
+/// `tolerance` from its curve, in the path's units, so under a transform that scales by `s` the
+/// error in pixels is `s * tolerance`. A curve that needs more than [`MAX_CURVE_SEGMENTS`] lines
+/// gets that many, and may stray further. Nothing is allocated, so the result can be walked
+/// twice, as `rasterize_path` does.
+///
+/// Each curve is split into equal steps of its parameter, the count from Wang's formula. A curve
+/// with no current point starts a contour at its end, as a `LineTo` does.
+///
+/// # Panics
+///
+/// If `tolerance` is not positive.
+pub fn flatten<I: IntoIterator<Item = PathCommand>>(commands: I, tolerance: f32) -> Flatten<I::IntoIter> {
+    assert!(tolerance > 0.0, "flatten tolerance must be positive");
+    Flatten {
+        commands: commands.into_iter(),
+        tolerance,
+        current: None,
+        curve: [[0.0; 2]; 4],
+        step: 0,
+        steps: 0,
+    }
+}
+
+/// The lines of a path with curves; see [`flatten`].
+#[derive(Clone, Debug)]
+pub struct Flatten<I> {
+    commands: I,
+    tolerance: f32,
+    current: Option<[f32; 2]>,
+    /// The curve being drawn, as a cubic, and how many of its `steps` lines are drawn.
+    curve: [[f32; 2]; 4],
+    step: u32,
+    steps: u32,
+}
+
+impl<I> Flatten<I> {
+    /// Starts drawing the cubic from the current point through `c1`, `c2` to `to`, or starts a
+    /// contour at `to` if there is no current point.
+    fn curve(&mut self, c1: [f32; 2], c2: [f32; 2], to: [f32; 2]) -> PathEvent {
+        let Some(from) = self.current.replace(to) else {
+            return PathEvent::LineTo(to);
+        };
+        self.curve = [from, c1, c2, to];
+        self.steps = segments(&self.curve, self.tolerance);
+        self.step = 0;
+        self.line()
+    }
+
+    fn line(&mut self) -> PathEvent {
+        self.step += 1;
+        if self.step == self.steps {
+            return PathEvent::LineTo(self.curve[3]);
+        }
+        let t = self.step as f32 / self.steps as f32;
+        let u = 1.0 - t;
+        let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+        let [p0, p1, p2, p3] = self.curve;
+        let at = |i: usize| w[0] * p0[i] + w[1] * p1[i] + w[2] * p2[i] + w[3] * p3[i];
+        PathEvent::LineTo([at(0), at(1)])
+    }
+}
+
+/// Wang's formula for a cubic: uniform steps in the parameter, enough that no line is farther
+/// than `tolerance` from the curve, which is `3/4 * max |p[i] - 2 p[i+1] + p[i+2]| / n^2` at most.
+/// A quadratic raised to a cubic gets the count the quadratic's own formula gives.
+fn segments(p: &[[f32; 2]; 4], tolerance: f32) -> u32 {
+    let second = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
+        let (x, y) = (a[0] - 2.0 * b[0] + c[0], a[1] - 2.0 * b[1] + c[1]);
+        x * x + y * y
+    };
+    let m = sqrt(second(p[0], p[1], p[2]).max(second(p[1], p[2], p[3])));
+    let n = ceil(sqrt(0.75 * m / tolerance));
+    // NaN, from a non-finite point, fails the first test.
+    if !(n >= 1.0) {
+        1
+    } else if n < MAX_CURVE_SEGMENTS as f32 {
+        n as u32
+    } else {
+        MAX_CURVE_SEGMENTS
+    }
+}
+
+impl<I: Iterator<Item = PathCommand>> Iterator for Flatten<I> {
+    type Item = PathEvent;
+
+    fn next(&mut self) -> Option<PathEvent> {
+        if self.step < self.steps {
+            return Some(self.line());
+        }
+        Some(match self.commands.next()? {
+            PathCommand::MoveTo(p) => {
+                self.current = Some(p);
+                PathEvent::MoveTo(p)
+            }
+            PathCommand::LineTo(p) => {
+                self.current = Some(p);
+                PathEvent::LineTo(p)
+            }
+            PathCommand::QuadTo(c, to) => {
+                let from = self.current.unwrap_or(to);
+                let raise =
+                    |p: [f32; 2]| [p[0] + 2.0 / 3.0 * (c[0] - p[0]), p[1] + 2.0 / 3.0 * (c[1] - p[1])];
+                self.curve(raise(from), raise(to), to)
+            }
+            PathCommand::CubicTo(c1, c2, to) => self.curve(c1, c2, to),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Closed, LEAST, clamp};
+    use super::{Closed, LEAST, PathCommand, clamp, flatten, segments};
     use crate::PathEvent::{LineTo, MoveTo};
     use alloc::vec::Vec;
+
+    #[test]
+    fn curve_segments_follow_wangs_formula() {
+        // A straight cubic with evenly spaced controls has no second difference: one line.
+        assert_eq!(segments(&[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], 0.01), 1);
+        // Second difference 12, so 0.75 * 12 / n^2 <= 0.1 needs n = 10; a quarter of the
+        // tolerance doubles it.
+        let bend = [[0.0, 0.0], [0.0, 12.0], [0.0, 12.0], [0.0, 0.0]];
+        assert_eq!(segments(&bend, 0.09), 10);
+        assert_eq!(segments(&bend, 0.0225), 20);
+        assert_eq!(segments(&bend, 1e-9), super::MAX_CURVE_SEGMENTS);
+        assert_eq!(segments(&[[0.0, 0.0], [f32::NAN, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1);
+        assert_eq!(segments(&[[0.0, 0.0], [f32::INFINITY, 0.0], [1.0, 1.0], [2.0, 0.0]], 0.1), 1024);
+    }
+
+    #[test]
+    fn flatten_draws_curves_to_their_ends() {
+        let quad = [PathCommand::MoveTo([0.0, 0.0]), PathCommand::QuadTo([10.0, 20.0], [20.0, 0.0])];
+        let events: Vec<_> = flatten(quad, 0.1).collect();
+        assert_eq!(events[0], MoveTo([0.0, 0.0]));
+        assert_eq!(*events.last().unwrap(), LineTo([20.0, 0.0]));
+        // Every point is on the parabola y = 2x - x^2 / 10, and the middle one is its apex.
+        for e in &events[1..] {
+            let LineTo([x, y]) = *e else {
+                panic!("{e:?}")
+            };
+            assert!((y - (2.0 * x - x * x / 10.0)).abs() < 1e-4, "{x}, {y}");
+        }
+        assert!(events.len() % 2 == 1 && events[events.len() / 2] == LineTo([10.0, 10.0]));
+        // With no current point, a curve starts a contour at its end.
+        let lone: Vec<_> = flatten([PathCommand::CubicTo([1.0, 1.0], [2.0, 1.0], [3.0, 0.0])], 0.1).collect();
+        assert_eq!(lone, [LineTo([3.0, 0.0])]);
+    }
 
     #[test]
     fn closed_closes_every_contour() {

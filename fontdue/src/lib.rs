@@ -38,7 +38,9 @@ pub use crate::lazy::LazyFont;
 pub use crate::outline::{
     GlyphRef, OutlineInfo, OutlineSource, PathEvent, PathGlyph, PathSource, SMALLEST_COORDINATE,
 };
-pub use crate::path::{Transform, TransformedMetrics, rasterize_path};
+pub use crate::path::{
+    Flatten, MAX_CURVE_SEGMENTS, PathCommand, Transform, TransformedMetrics, flatten, rasterize_path,
+};
 pub use crate::transform::{
     PenOffsets, rasterize_source_transformed, rasterize_source_transformed_indexed, rasterize_transformed,
     transformed_raster_capacity,

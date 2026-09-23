@@ -1,6 +1,7 @@
 use crate::{
-    GlyphRef, LineMetrics, Metrics,
+    LineMetrics, Metrics,
     layout::GlyphRasterConfig,
+    outline::GlyphRef,
     raster::{BitmapIter, Raster},
 };
 

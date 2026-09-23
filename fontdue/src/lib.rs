@@ -19,12 +19,14 @@ mod hash;
 pub mod layout;
 #[doc(hidden)]
 pub mod math;
+pub mod outline;
 mod platform;
 pub mod raster;
 mod table;
 mod unicode;
 
 pub use crate::font::*;
+pub use crate::outline::{GlyphRef, LineGlyph, OutlineInfo, OutlineSource};
 
 #[cfg(feature = "hashbrown")]
 pub(crate) use hashbrown::{HashMap, HashSet};

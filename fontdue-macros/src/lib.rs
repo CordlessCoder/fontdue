@@ -39,23 +39,16 @@ fn f32x4_to_tokens(val: &fontdue::math::f32x4) -> proc_macro2::TokenStream {
     }
 }
 fn line_to_tokens(line: &fontdue::math::Line) -> proc_macro2::TokenStream {
-    let coords = f32x4_to_tokens(&line.coords);
-    let [tdx, tdy] = line.params;
+    let coords = f32x4_to_tokens(&line.coords());
+    let [tdx, tdy] = line.params();
+    // SAFETY (of the emitted code): the parts come from a `Line` the font built.
     quote! {
-        ::fontdue::math::Line {
-            coords: #coords,
-            params: [#tdx, #tdy]
-        }
+        unsafe { ::fontdue::math::Line::from_parts(#coords, [#tdx, #tdy]) }
     }
 }
 fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
-    let Glyph {
-        v_lines,
-        m_lines,
-        bounds,
-        advance_width,
-        advance_height,
-    } = glyph;
+    let (v_lines, m_lines, bounds) = (glyph.v_lines(), glyph.m_lines(), glyph.bounds());
+    let (advance_width, advance_height) = (glyph.advance_width(), glyph.advance_height());
     let OutlineBounds {
         xmin,
         ymin,
@@ -65,18 +58,21 @@ fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
 
     let v_lines = v_lines.iter().map(line_to_tokens);
     let m_lines = m_lines.iter().map(line_to_tokens);
+    // SAFETY (of the emitted code): the lines and bounds are a `Glyph`'s that the font outlined.
     quote! {
-        ::fontdue::font::GlyphRef {
-            v_lines: &[#(#v_lines),*],
-            m_lines: &[#(#m_lines),*],
-            bounds: ::fontdue::font::OutlineBounds {
-                xmin: #xmin,
-                ymin: #ymin,
-                width: #width,
-                height: #height,
-            },
-            advance_width: #advance_width,
-            advance_height: #advance_height,
+        unsafe {
+            ::fontdue::LineGlyph::new(
+                &[#(#v_lines),*],
+                &[#(#m_lines),*],
+                ::fontdue::OutlineBounds {
+                    xmin: #xmin,
+                    ymin: #ymin,
+                    width: #width,
+                    height: #height,
+                },
+                #advance_width,
+                #advance_height,
+            )
         }
     }
 }
@@ -265,11 +261,11 @@ fn fontdue_font_from_file_impl(
             }
 
             #[inline(always)]
-            fn get_glyph_at_index(&self, index: u16) -> ::fontdue::font::GlyphRef<'_> {
-                static GLYPHS: &'static [::fontdue::font::GlyphRef<'static>] = &[
+            fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
+                static GLYPHS: &'static [::fontdue::LineGlyph<'static>] = &[
                     #(#glyphs),*
                 ];
-                GLYPHS[index as usize]
+                GLYPHS[index as usize].into()
             }
 
             /// Gets the total glyphs in the font.

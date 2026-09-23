@@ -236,9 +236,10 @@ impl Point {
 #[derive(Copy, Clone)]
 pub struct Line {
     /// X0, Y0, X1, Y1.
-    pub coords: f32x4,
-    /// Reciprocal X and Y deltas.
-    pub params: [f32; 2],
+    pub(crate) coords: f32x4,
+    /// Reciprocal X and Y deltas. The line walk's crossing order depends on them, so a line
+    /// whose reciprocals do not match its coordinates can step past its end cell.
+    pub(crate) params: [f32; 2],
 }
 
 #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
@@ -261,6 +262,26 @@ impl Line {
                 1.0 / dy,
             ],
         }
+    }
+
+    /// A line from the parts `coords` and `params` return, for code the macro emits.
+    ///
+    /// # Safety
+    ///
+    /// `params` must be what `Line::new` computes for `coords`.
+    pub const unsafe fn from_parts(coords: f32x4, params: [f32; 2]) -> Line {
+        Line {
+            coords,
+            params,
+        }
+    }
+
+    pub fn coords(&self) -> f32x4 {
+        self.coords
+    }
+
+    pub fn params(&self) -> [f32; 2] {
+        self.params
     }
 
     #[inline(always)]

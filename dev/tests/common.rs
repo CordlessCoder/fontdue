@@ -170,3 +170,71 @@ fn extreme_but_valid_px_still_renders() {
         assert_eq!(bitmap.count(), metrics.width * metrics.height, "px = {px}");
     }
 }
+
+/// Replays a font's own lines as a streaming source, in half font units so the unit is exercised.
+/// Vertical lines go first, as the stored-lines path draws them, so renders must match exactly.
+struct ReplayedFont(Font);
+
+// SAFETY: the points are the font's own lines, which lie inside its bounds, halved along with the
+// bounds. Halving is exact.
+unsafe impl fontdue::OutlineSource for ReplayedFont {
+    fn info(&self, glyph: u16) -> fontdue::OutlineInfo {
+        let g = &self.0.internal_glyph_slice()[glyph as usize];
+        let b = g.bounds();
+        fontdue::OutlineInfo {
+            bounds: fontdue::OutlineBounds {
+                xmin: b.xmin / 2.0,
+                ymin: b.ymin / 2.0,
+                width: b.width / 2.0,
+                height: b.height / 2.0,
+            },
+            unit: 2.0,
+            advance_width: g.advance_width(),
+            advance_height: g.advance_height(),
+        }
+    }
+
+    fn draw(&self, glyph: u16, sink: &mut fontdue::raster::Sink<'_, '_>) {
+        let g = &self.0.internal_glyph_slice()[glyph as usize];
+        for line in g.v_lines().iter().chain(g.m_lines()) {
+            let (x0, y0, x1, y1) = line.coords().copied();
+            sink.segment([x0 / 2.0, y0 / 2.0, x1 / 2.0, y1 / 2.0]);
+        }
+    }
+}
+
+#[test]
+fn sources_render_like_stored_lines() {
+    let font = roboto();
+    let source = ReplayedFont(roboto());
+    let (mut want, mut generic, mut dynamic) = (
+        fontdue::raster::Raster::empty(),
+        fontdue::raster::Raster::empty(),
+        fontdue::raster::Raster::empty(),
+    );
+    for index in 0..font.glyph_count() {
+        for (px, stretch) in [(12.0, 1.0), (32.0, 1.0), (32.0, 3.0)] {
+            let scale = font.scale_factor(px);
+            let stored = font.get_glyph_at_index(index);
+            let m = fontdue::rasterize_inner(&mut want, &stored, scale, stretch);
+            let g = fontdue::rasterize_source(&mut generic, &source, index, scale, stretch);
+            let d = fontdue::rasterize_inner(
+                &mut dynamic,
+                &fontdue::GlyphRef::from_source(&source, index),
+                scale,
+                stretch,
+            );
+            let want: Vec<u8> = want.get_bitmap_iter().collect();
+            assert_eq!(
+                (m, &want),
+                (g, &generic.get_bitmap_iter().collect()),
+                "glyph {index} at {px} px x{stretch}"
+            );
+            assert_eq!(
+                (m, &want),
+                (d, &dynamic.get_bitmap_iter().collect()),
+                "glyph {index} at {px} px x{stretch}"
+            );
+        }
+    }
+}

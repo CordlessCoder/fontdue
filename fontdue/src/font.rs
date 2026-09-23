@@ -1,8 +1,9 @@
 use crate::FontResult;
 pub use crate::fontrepr::FontRepr;
 use crate::math::{Geometry, Line};
+use crate::outline::{GlyphRef, OutlineInfo, OutlineSource};
 use crate::platform::{as_i32, as_i32_unchecked, ceil, floor, fract, is_negative};
-use crate::raster::Raster;
+use crate::raster::{Raster, Sink};
 use crate::table::{TableKern, load_gsub};
 use crate::unicode;
 use crate::{HashMap, HashSet};
@@ -139,44 +140,32 @@ impl LineMetrics {
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct Glyph {
-    pub v_lines: Vec<Line>,
-    pub m_lines: Vec<Line>,
-    #[doc(hidden)]
-    pub advance_width: f32,
-    #[doc(hidden)]
-    pub advance_height: f32,
-    pub bounds: OutlineBounds,
+    pub(crate) v_lines: Vec<Line>,
+    pub(crate) m_lines: Vec<Line>,
+    pub(crate) advance_width: f32,
+    pub(crate) advance_height: f32,
+    pub(crate) bounds: OutlineBounds,
 }
 
-#[derive(Clone, Copy)]
-#[doc(hidden)]
-pub struct GlyphRef<'l> {
-    pub v_lines: &'l [Line],
-    pub m_lines: &'l [Line],
-    #[doc(hidden)]
-    pub advance_width: f32,
-    #[doc(hidden)]
-    pub advance_height: f32,
-    pub bounds: OutlineBounds,
-}
+impl Glyph {
+    pub fn v_lines(&self) -> &[Line] {
+        &self.v_lines
+    }
 
-impl<'l> GlyphRef<'l> {
-    #[inline(always)]
-    pub fn from_glyph(glyph: &'l Glyph) -> Self {
-        let Glyph {
-            v_lines,
-            m_lines,
-            advance_width,
-            advance_height,
-            bounds,
-        } = &glyph;
-        Self {
-            v_lines: v_lines,
-            m_lines: m_lines,
-            advance_width: *advance_width,
-            advance_height: *advance_height,
-            bounds: *bounds,
-        }
+    pub fn m_lines(&self) -> &[Line] {
+        &self.m_lines
+    }
+
+    pub fn bounds(&self) -> OutlineBounds {
+        self.bounds
+    }
+
+    pub fn advance_width(&self) -> f32 {
+        self.advance_width
+    }
+
+    pub fn advance_height(&self) -> f32 {
+        self.advance_height
     }
 }
 
@@ -299,12 +288,14 @@ const MAX_DIMENSION: f32 = 2147483520.0;
 /// `px`, none of which have a meaningful raster.
 #[doc(hidden)]
 pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f32, f32) {
-    metrics_raw_stretched(scale, glyph, offset, 1.0)
+    metrics_raw_stretched(scale, &glyph.info(), offset, 1.0)
 }
 
+/// The metrics, and the subpixel offsets the draw adds to every point. Bounds and points are
+/// scaled by the same `scale * unit`, so a point inside the bounds lands inside the raster.
 #[inline(always)]
-fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch: f32) -> (Metrics, f32, f32) {
-    let bounds = glyph.bounds.scale(scale);
+fn metrics_raw_stretched(scale: f32, glyph: &OutlineInfo, offset: f32, stretch: f32) -> (Metrics, f32, f32) {
+    let bounds = glyph.bounds.scale(scale * glyph.unit);
     let mut offset_x = fract(bounds.xmin + offset);
     let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
     if is_negative(offset_x) {
@@ -346,14 +337,39 @@ fn metrics_raw_stretched(scale: f32, glyph: &GlyphRef<'_>, offset: f32, stretch:
 
 #[inline(always)]
 pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32, stretch: f32) -> Metrics {
-    let (metrics, offset_x, offset_y) = metrics_raw_stretched(scale, glyph, 0.0, stretch);
+    rasterize_with(canvas, &glyph.info(), scale, stretch, |sink| glyph.draw(sink))
+}
+
+/// Rasterizes one glyph of `source`, monomorphized over the source. [`GlyphRef::from_source`] is
+/// the dynamically dispatched form that `FontRepr` returns.
+#[inline(always)]
+pub fn rasterize_source<S: OutlineSource + ?Sized>(
+    canvas: &mut Raster<'_>,
+    source: &S,
+    glyph: u16,
+    scale: f32,
+    stretch: f32,
+) -> Metrics {
+    rasterize_with(canvas, &source.info(glyph), scale, stretch, |sink| source.draw(glyph, sink))
+}
+
+#[inline(always)]
+fn rasterize_with(
+    canvas: &mut Raster<'_>,
+    info: &OutlineInfo,
+    scale: f32,
+    stretch: f32,
+    draw: impl FnOnce(&mut Sink<'_, '_>),
+) -> Metrics {
+    let (metrics, offset_x, offset_y) = metrics_raw_stretched(scale, info, 0.0, stretch);
     // Ceiling, not truncation. `draw` scales x by `stretch`, so a fractional product still writes
     // into the column it lands inside, and a truncated width hands `add` a row shorter than it
     // fills. Only 1.0 and 3.0 reach this today and both are exact, so nothing here is load-bearing
     // for the shipped paths; it stops the general form from being wrong.
     let raster_width = as_i32(ceil(metrics.width as f32 * stretch)) as usize;
     canvas.resize(raster_width, metrics.height);
-    canvas.draw(&glyph, scale * stretch, scale, offset_x * stretch, offset_y);
+    let scale = scale * info.unit;
+    draw(&mut Sink::new(canvas, scale * stretch, scale, offset_x * stretch, offset_y));
     metrics
 }
 

@@ -4,10 +4,11 @@
  * is safe. Please be aware of this.
  */
 
-use crate::GlyphRef;
+use crate::math::{Line, Point};
 use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, mul_add};
 use alloc::vec::*;
 use core::iter::FusedIterator;
+use core::marker::PhantomData;
 
 enum RasterBuffer<'a> {
     Owned(Vec<f32>),
@@ -92,26 +93,119 @@ impl<'a> Raster<'a> {
         }
     }
 
-    pub(crate) fn draw(
-        &mut self,
-        glyph: &GlyphRef<'_>,
+    #[inline(always)]
+    pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
+        BitmapIter {
+            a: match &self.a {
+                RasterBuffer::Owned(a) => a,
+                RasterBuffer::Borrowed(a) => a,
+            },
+            pos: 0,
+            remaining: self.w * self.h,
+            height: 0.0,
+            block: 0,
+            block_left: 0,
+        }
+    }
+}
+
+/// Float-to-int for the line loops.
+///
+/// Lines are only drawn through a `Sink`, which `rasterize_with` makes for a raster sized from
+/// `metrics_raw`, and every glyph kind promises its points lie inside the bounds those metrics came
+/// from (see `outline`). Every value converted here is a pixel coordinate inside those bounds, so
+/// the unchecked convert has its precondition. This
+/// is the same trust `add` already places in the caller, and the notice at the top of the file is
+/// about exactly this.
+#[inline(always)]
+fn index_of(value: f32) -> i32 {
+    unsafe { as_i32_unchecked(value) }
+}
+
+/// Where an [`OutlineSource`](crate::OutlineSource) sends a glyph's segments. Only the raster
+/// makes one, sized and scaled for the glyph being drawn.
+pub struct Sink<'s, 'b> {
+    /// The raster's cells, taken out of it once so nothing in the line walk can alias them. The
+    /// buffer holds `w * h + 3` cells, `resize` having sized it for the glyph.
+    cells: *mut f32,
+    w: i32,
+    /// Scalars, not the `f32x4`s the walk takes: read back from memory in a source's out-of-line
+    /// `draw`, duplicated lanes are separate loads and separate live registers.
+    scale_x: f32,
+    scale_y: f32,
+    inv_x: f32,
+    inv_y: f32,
+    offset_x: f32,
+    offset_y: f32,
+    _raster: PhantomData<&'s mut Raster<'b>>,
+}
+
+impl<'s, 'b> Sink<'s, 'b> {
+    #[inline(always)]
+    pub(crate) fn new(
+        raster: &'s mut Raster<'b>,
         scale_x: f32,
         scale_y: f32,
         offset_x: f32,
         offset_y: f32,
-    ) {
-        let params = f32x4::new(1.0 / scale_x, 1.0 / scale_y, scale_x, scale_y);
-        let scale = f32x4::new(scale_x, scale_y, scale_x, scale_y);
-        let offset = f32x4::new(offset_x, offset_y, offset_x, offset_y);
-        for line in glyph.v_lines {
-            let (nudge, adjustment, _) = line.raster_parts();
-            self.v_line(line.coords * scale + offset, nudge, adjustment);
+    ) -> Self {
+        let w = raster.w as i32;
+        let cells = match &mut raster.a {
+            RasterBuffer::Owned(a) => a.as_mut_ptr(),
+            RasterBuffer::Borrowed(a) => a.as_mut_ptr(),
+        };
+        Sink {
+            cells,
+            w,
+            scale_x,
+            scale_y,
+            inv_x: 1.0 / scale_x,
+            inv_y: 1.0 / scale_y,
+            offset_x,
+            offset_y,
+            _raster: PhantomData,
         }
-        for line in glyph.m_lines {
-            let (nudge, adjustment, mut line_params) = line.raster_parts();
-            line_params = line_params * params;
-            self.m_line(line.coords * scale + offset, nudge, adjustment, line_params);
+    }
+
+    /// Draws one segment, `[x0, y0, x1, y1]` in the source's point units.
+    #[inline(always)]
+    pub fn segment(&mut self, [x0, y0, x1, y1]: [f32; 4]) {
+        let line = Line::new(Point::new(x0, y0), Point::new(x1, y1));
+        if x0 == x1 {
+            self.v(&line);
+        } else {
+            self.m(&line);
         }
+    }
+
+    #[inline(always)]
+    pub(crate) fn lines(&mut self, v_lines: &[Line], m_lines: &[Line]) {
+        for line in v_lines {
+            self.v(line);
+        }
+        for line in m_lines {
+            self.m(line);
+        }
+    }
+
+    /// The line's coordinates in raster space.
+    #[inline(always)]
+    fn place(&self, line: &Line) -> f32x4 {
+        let (sx, sy, ox, oy) = (self.scale_x, self.scale_y, self.offset_x, self.offset_y);
+        line.coords * f32x4::new(sx, sy, sx, sy) + f32x4::new(ox, oy, ox, oy)
+    }
+
+    #[inline(always)]
+    fn v(&mut self, line: &Line) {
+        let (nudge, adjustment, _) = line.raster_parts();
+        self.v_line(self.place(line), nudge, adjustment);
+    }
+
+    #[inline(always)]
+    fn m(&mut self, line: &Line) {
+        let (nudge, adjustment, line_params) = line.raster_parts();
+        let params = f32x4::new(self.inv_x, self.inv_y, self.scale_x, self.scale_y);
+        self.m_line(self.place(line), nudge, adjustment, line_params * params);
     }
 
     #[inline(always)]
@@ -119,11 +213,7 @@ impl<'a> Raster<'a> {
         // This is fast and hip.
         unsafe {
             let m = height * mid_x;
-            let a = match &mut self.a {
-                RasterBuffer::Owned(a) => a.as_mut_slice(),
-                RasterBuffer::Borrowed(a) => a,
-            };
-            let cell = a.as_mut_ptr().add(index);
+            let cell = self.cells.add(index);
             *cell += height - m;
             *cell.add(1) += m;
         }
@@ -140,7 +230,7 @@ impl<'a> Raster<'a> {
         let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
         let mut target_y = (start_y + adjustment[1]) as f32;
         let sy = copysign(1f32, y1 - y0);
-        let w = self.w as i32;
+        let w = self.w;
         let mut y_prev = y0;
         let mut index = start_x + start_y * w;
         let index_y_inc = with_sign_of(w, y1 - y0);
@@ -171,7 +261,7 @@ impl<'a> Raster<'a> {
         let mut tmy = tdy * (target_y as f32 - y0);
         let tdx = abs(tdx);
         let tdy = abs(tdy);
-        let w = self.w as i32;
+        let w = self.w;
         let mut x_prev = x0;
         let mut y_prev = y0;
         let mut index = start_x + start_y * w;
@@ -200,33 +290,6 @@ impl<'a> Raster<'a> {
         }
         self.add((end_x + end_y * w) as usize, y_prev - y1, fract_of((x_prev + x1) / 2.0));
     }
-
-    #[inline(always)]
-    pub fn get_bitmap_iter<'r>(&'r self) -> BitmapIter<'r> {
-        BitmapIter {
-            a: match &self.a {
-                RasterBuffer::Owned(a) => a,
-                RasterBuffer::Borrowed(a) => a,
-            },
-            pos: 0,
-            remaining: self.w * self.h,
-            height: 0.0,
-            block: 0,
-            block_left: 0,
-        }
-    }
-}
-
-/// Float-to-int for the line loops.
-///
-/// `draw` is only ever reached through `rasterize_inner`, which sizes the raster from
-/// `metrics_raw` and then scales every coordinate into it. Every value converted here is a pixel
-/// coordinate inside those bounds, so the unchecked convert has its precondition. This
-/// is the same trust `add` already places in the caller, and the notice at the top of the file is
-/// about exactly this.
-#[inline(always)]
-fn index_of(value: f32) -> i32 {
-    unsafe { as_i32_unchecked(value) }
 }
 
 /// The pixel column and row each end of a line lies in, after the nudges. The loops keep indices

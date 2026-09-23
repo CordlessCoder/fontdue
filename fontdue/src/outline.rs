@@ -38,6 +38,22 @@ pub unsafe trait OutlineSource {
     fn draw(&self, glyph: u16, sink: &mut Sink<'_, '_>);
 }
 
+/// An [`OutlineSource`] whose segments also come out of an iterator, which is what the generic
+/// [`crate::rasterize_source`] draws from. `GlyphRef` and dynamic dispatch use `draw`, since an
+/// associated iterator type would have to be named in `dyn OutlineSource`.
+///
+/// # Safety
+///
+/// Every segment `segments` yields for a glyph must satisfy the same bound as [`OutlineSource`]
+/// requires of `draw`: both endpoints inside the bounds `info` returns for that glyph.
+pub unsafe trait SegmentSource: OutlineSource {
+    type Segments<'a>: Iterator<Item = [f32; 4]>
+    where
+        Self: 'a;
+
+    fn segments(&self, glyph: u16) -> Self::Segments<'_>;
+}
+
 /// A glyph stored as lines, split into vertical lines and all others, as `Font` and the macro
 /// keep them.
 #[derive(Clone, Copy)]

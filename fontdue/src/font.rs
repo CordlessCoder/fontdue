@@ -1,7 +1,7 @@
 use crate::FontResult;
 pub use crate::fontrepr::FontRepr;
 use crate::math::{Geometry, Line};
-use crate::outline::{GlyphRef, OutlineInfo, OutlineSource};
+use crate::outline::{GlyphRef, OutlineInfo, SegmentSource};
 use crate::platform::{as_i32, as_i32_unchecked, ceil, floor, fract, is_negative};
 use crate::raster::{Raster, Sink};
 use crate::table::{TableKern, load_gsub};
@@ -343,14 +343,22 @@ pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32
 /// Rasterizes one glyph of `source`, monomorphized over the source. [`GlyphRef::from_source`] is
 /// the dynamically dispatched form that `FontRepr` returns.
 #[inline(always)]
-pub fn rasterize_source<S: OutlineSource + ?Sized>(
+pub fn rasterize_source<S: SegmentSource + ?Sized>(
     canvas: &mut Raster<'_>,
     source: &S,
     glyph: u16,
     scale: f32,
     stretch: f32,
 ) -> Metrics {
-    rasterize_with(canvas, &source.info(glyph), scale, stretch, |sink| source.draw(glyph, sink))
+    // Taken before the glyph is measured and the raster sized, not inside the draw. Built after
+    // those steps, the iterator's state cost the line walk two registers on Xtensa, reloaded on
+    // every cell crossing.
+    let segments = source.segments(glyph);
+    rasterize_with(canvas, &source.info(glyph), scale, stretch, |sink| {
+        for segment in segments {
+            sink.segment(segment);
+        }
+    })
 }
 
 #[inline(always)]

@@ -195,11 +195,22 @@ unsafe impl fontdue::OutlineSource for ReplayedFont {
     }
 
     fn draw(&self, glyph: u16, sink: &mut fontdue::raster::Sink<'_, '_>) {
-        let g = &self.0.internal_glyph_slice()[glyph as usize];
-        for line in g.v_lines().iter().chain(g.m_lines()) {
-            let (x0, y0, x1, y1) = line.coords().copied();
-            sink.segment([x0 / 2.0, y0 / 2.0, x1 / 2.0, y1 / 2.0]);
+        for segment in fontdue::SegmentSource::segments(self, glyph) {
+            sink.segment(segment);
         }
+    }
+}
+
+// SAFETY: the same segments `draw` passes, which lie inside the halved bounds.
+unsafe impl fontdue::SegmentSource for ReplayedFont {
+    type Segments<'a> = Box<dyn Iterator<Item = [f32; 4]> + 'a>;
+
+    fn segments(&self, glyph: u16) -> Self::Segments<'_> {
+        let g = &self.0.internal_glyph_slice()[glyph as usize];
+        Box::new(g.v_lines().iter().chain(g.m_lines()).map(|line| {
+            let (x0, y0, x1, y1) = line.coords().copied();
+            [x0 / 2.0, y0 / 2.0, x1 / 2.0, y1 / 2.0]
+        }))
     }
 }
 

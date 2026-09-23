@@ -305,8 +305,12 @@ pub(crate) fn metrics_raw_stretched(
     stretch: f32,
 ) -> (Metrics, f32, f32) {
     let bounds = glyph.bounds.scale(scale * glyph.unit);
+    // The draw places points down from the glyph's top edge, so `ymin` is the raster's top less
+    // its height. Floored from the bottom edge instead, it disagrees by a row wherever rounding
+    // puts an edge on the other side of a whole pixel.
+
     // Below 2^22 every value converted here is under 2^23, where a float has a fraction and its
-    // conversions fit `i32`, so one check replaces the guard in each of eight conversions. NaN
+    // conversions fit `i32`, so one check replaces the guard in each of six conversions. NaN
     // fails it. Past it, `outside` does the same arithmetic with the guarded forms.
     const FAST: f32 = 4194304.0;
     let fast = abs(bounds.xmin) < FAST
@@ -317,8 +321,9 @@ pub(crate) fn metrics_raw_stretched(
     let ([xmin, ymin, width, height], offset_x, offset_y) = if fast {
         // SAFETY: every argument is under 2^23 in magnitude, by the check above.
         let fract = |v: f32| v - unsafe { as_i32_unchecked(v) } as f32;
+        let top = bounds.ymin + bounds.height;
         let mut offset_x = fract(bounds.xmin + offset);
-        let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
+        let mut offset_y = fract(-top);
         // Unlike the guarded `fract`, this one gives -0 for -0; either way no offset is added.
         if offset_x < 0.0 {
             offset_x += 1.0;
@@ -327,14 +332,15 @@ pub(crate) fn metrics_raw_stretched(
             offset_y += 1.0;
         }
         // SAFETY: as above; the offsets are in [0, 1).
-        let (xmin, ymin, width, height) = unsafe {
+        let (xmin, top, width, height) = unsafe {
             (
                 floor_i32_unchecked(bounds.xmin),
-                floor_i32_unchecked(bounds.ymin),
+                ceil_i32_unchecked(top),
                 ceil_i32_unchecked(bounds.width + offset_x),
                 ceil_i32_unchecked(bounds.height + offset_y),
             )
         };
+        let ymin = top - height;
         // The guarded path's range check, reduced to what can fail below 2^23.
         if !(width >= 0 && height >= 0 && (0.0..=MAX_DIMENSION).contains(&(width as f32 * stretch))) {
             out_of_range(scale);
@@ -358,8 +364,9 @@ pub(crate) fn metrics_raw_stretched(
 /// `metrics_raw_stretched` for bounds or an offset of 2^22 or more, or NaN.
 #[cold]
 fn outside(scale: f32, bounds: &OutlineBounds, offset: f32, stretch: f32) -> ([i32; 4], f32, f32) {
+    let top = bounds.ymin + bounds.height;
     let mut offset_x = fract(bounds.xmin + offset);
-    let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
+    let mut offset_y = fract(-top);
     if is_negative(offset_x) {
         offset_x += 1.0;
     }
@@ -367,9 +374,9 @@ fn outside(scale: f32, bounds: &OutlineBounds, offset: f32, stretch: f32) -> ([i
         offset_y += 1.0;
     }
     let xmin = floor(bounds.xmin);
-    let ymin = floor(bounds.ymin);
     let width = ceil(bounds.width + offset_x);
     let height = ceil(bounds.height + offset_y);
+    let ymin = ceil(top) - height;
     // Every later stage trusts these dimensions: `resize` sizes the buffer from them and `add`
     // indexes it with `get_unchecked_mut`. A px large enough to saturate the width while the
     // height truncates to zero would size the buffer at three floats and then write past it. The

@@ -25,40 +25,18 @@ fn upright(font: &dyn FontRepr, canvas: &mut Raster, index: u16, px: f32) -> (fo
     (m, image)
 }
 
-/// Whether the upright path may have placed the glyph a row off. It floors the bottom of the
-/// bounds for `Metrics::ymin` but places the glyph from a gap computed with `fract`, and where the
-/// top or bottom is within rounding of a whole pixel the two can disagree by a row. The
-/// transformed path places the glyph from its points alone.
-fn upright_row_is_fragile(m: &fontdue::Metrics) -> bool {
+/// Whether the glyph's top or bottom is within rounding of a whole pixel. The upright path sizes
+/// the raster from the bounds and the transformed path from the points, so there either can
+/// round the edge past the pixel line and add an empty row.
+fn row_edge_is_near_whole_pixel(m: &fontdue::Metrics) -> bool {
     let near = |v: f32| (v - v.round()).abs() < 1e-4;
     near(m.bounds.ymin) || near(m.bounds.ymin + m.bounds.height)
 }
 
-/// As `upright_row_is_fragile`, for the width: `ceil(width + fract(xmin))` can add an empty
-/// column where the right edge is within rounding of a whole pixel.
-fn upright_column_is_fragile(m: &fontdue::Metrics) -> bool {
+/// As `row_edge_is_near_whole_pixel`, for the right edge and an empty column.
+fn column_edge_is_near_whole_pixel(m: &fontdue::Metrics) -> bool {
     let right = m.bounds.xmin + m.bounds.width;
     (right - right.round()).abs() < 1e-4
-}
-
-/// The vertical shift, 0 unless the upright placement is fragile, that best aligns the upright
-/// image with `got`, and the largest pixel difference at it.
-fn aligned_diff(
-    m: &fontdue::Metrics,
-    want: &Image,
-    got: &Image,
-    f: impl Fn(i32, i32) -> (i32, i32),
-) -> (i32, u8) {
-    let shifts: &[i32] = if upright_row_is_fragile(m) {
-        &[0, -1, 1]
-    } else {
-        &[0]
-    };
-    shifts
-        .iter()
-        .map(|&dy| (dy, max_diff(&moved(want, |x, y| f(x, y + dy)), got)))
-        .min_by_key(|&(dy, d)| (d, dy != 0))
-        .unwrap()
 }
 
 fn transformed(
@@ -120,9 +98,9 @@ fn matches_upright(transform: Transform, f: impl Fn(i32, i32) -> (i32, i32), lim
     for (name, font) in dev_fonts() {
         for px in [12.0, 32.0] {
             for index in 0..font.glyph_count() {
-                let (m, want) = upright(&font, &mut a, index, px);
+                let (_, want) = upright(&font, &mut a, index, px);
                 let got = transformed(&font, &mut b, index, px, transform, (0.0, 0.0));
-                let (_, d) = aligned_diff(&m, &want, &got, &f);
+                let d = max_diff(&moved(&want, &f), &got);
                 assert!(d <= limit, "{name} glyph {index} at {px} px differs by {d}");
             }
         }
@@ -145,7 +123,7 @@ fn identity_matches_upright() {
             }
             let top = -3 - (m.ymin + m.height as i32);
             let (row_slack, column_slack) =
-                (upright_row_is_fragile(&m) as usize, upright_column_is_fragile(&m) as usize);
+                (row_edge_is_near_whole_pixel(&m) as usize, column_edge_is_near_whole_pixel(&m) as usize);
             assert!(
                 t.x == 7 + m.xmin
                     && top.abs_diff(t.y) as usize <= row_slack

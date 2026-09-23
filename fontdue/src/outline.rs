@@ -27,10 +27,17 @@ pub struct OutlineInfo {
 ///
 /// # Safety
 ///
-/// For every glyph, each segment `draw` passes to the sink must have both endpoints inside
-/// `[0, width] x [0, height]` of the bounds `info` returns for that glyph, and `info` must return
-/// the same bounds on every call. The raster writes without bounds checks, so a point outside
-/// them writes out of bounds.
+/// For every glyph, each segment `draw` passes to the sink must:
+///
+/// - have both endpoints inside `[0, width] x [0, height]` of the bounds `info` returns for that
+///   glyph, and `info` must return the same bounds on every call;
+/// - have `y0 != y1`, since a segment with no vertical extent covers nothing and has no finite
+///   reciprocal;
+/// - have `x1 - x0` either zero or a normal float, and `y1 - y0` a normal float.
+///
+/// The raster writes without bounds checks. A point outside the bounds writes out of bounds, and
+/// so can a line walk whose reciprocals are wrong, which the last two rules prevent: the reciprocal
+/// the raster uses at draw time on Xtensa is only exact to 1 ulp for normal values.
 pub unsafe trait OutlineSource {
     fn info(&self, glyph: u16) -> OutlineInfo;
 
@@ -44,8 +51,8 @@ pub unsafe trait OutlineSource {
 ///
 /// # Safety
 ///
-/// Every segment `segments` yields for a glyph must satisfy the same bound as [`OutlineSource`]
-/// requires of `draw`: both endpoints inside the bounds `info` returns for that glyph.
+/// Every segment `segments` yields for a glyph must meet the rules [`OutlineSource`] sets for the
+/// segments `draw` passes.
 pub unsafe trait SegmentSource: OutlineSource {
     type Segments<'a>: Iterator<Item = [f32; 4]>
     where

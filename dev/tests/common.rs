@@ -176,7 +176,8 @@ fn extreme_but_valid_px_still_renders() {
 struct ReplayedFont(Font);
 
 // SAFETY: the points are the font's own lines, which lie inside its bounds, halved along with the
-// bounds. Halving is exact.
+// bounds. Halving is exact. `Geometry` drops lines with no vertical extent, and Roboto's deltas
+// are far from subnormal.
 unsafe impl fontdue::OutlineSource for ReplayedFont {
     fn info(&self, glyph: u16) -> fontdue::OutlineInfo {
         let g = &self.0.internal_glyph_slice()[glyph as usize];

@@ -654,7 +654,9 @@ impl<'a> Store<'a> {
 
 // SAFETY: a `Store` built by `new` has decoded every glyph under `Checked`, which requires every
 // point to lie inside the glyph's size in grid units, which is what `grid_bounds` returns. The
-// trusted decode yields exactly those points. `new_unchecked` moves that obligation to its caller.
+// trusted decode yields exactly those points. `new_unchecked` and `from_parts` move that
+// obligation to their callers. Points are whole grid units below 2^16, so every delta is zero or
+// a normal float, and the decoder skips steps with no vertical extent.
 unsafe impl crate::OutlineSource for Store<'_> {
     #[inline]
     fn info(&self, glyph: u16) -> crate::OutlineInfo {

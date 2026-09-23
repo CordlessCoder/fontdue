@@ -167,14 +167,11 @@ impl<'s, 'b> Sink<'s, 'b> {
         }
     }
 
-    /// Draws one segment, `[x0, y0, x1, y1]` in the source's point units. A segment with no
-    /// vertical extent covers nothing and is skipped, as fontdue's own outlines drop them. Its
-    /// reciprocal is infinite, which can let the line walk step past the segment's end cell.
+    /// Draws one segment, `[x0, y0, x1, y1]` in the source's point units. The segment must meet
+    /// [`OutlineSource`](crate::OutlineSource)'s contract, which the source promised by
+    /// implementing it: that is what makes its reciprocals, and so the line walk, stay in bounds.
     #[inline(always)]
     pub fn segment(&mut self, [x0, y0, x1, y1]: [f32; 4]) {
-        if y0 == y1 {
-            return;
-        }
         let line = Line::at_draw(Point::new(x0, y0), Point::new(x1, y1));
         if x0 == x1 {
             self.v(&line);

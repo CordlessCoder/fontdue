@@ -32,32 +32,66 @@ fn line_metrics_to_tokens(lm: &LineMetrics) -> proc_macro2::TokenStream {
         }
     }
 }
-fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
-    let (advance_width, advance_height) = (glyph.advance_width(), glyph.advance_height());
-    let OutlineBounds {
-        xmin,
-        ymin,
-        width,
-        height,
-    } = glyph.bounds();
-    let points = glyph.points().iter().map(|[x, y]| quote! { [#x, #y] });
-    let contours = glyph.contours();
-    // SAFETY (of the emitted code): the points and bounds are a `Glyph`'s that the font outlined.
-    quote! {
-        unsafe {
-            ::fontdue::PathGlyph::new(
-                &[#(#points),*],
-                &[#(#contours),*],
-                ::fontdue::OutlineBounds {
-                    xmin: #xmin,
-                    ymin: #ymin,
-                    width: #width,
-                    height: #height,
-                },
-                #advance_width,
-                #advance_height,
-            )
+/// Where `items` already appear in `pool`, or where they now do after being appended.
+fn share<T: PartialEq + Copy>(pool: &mut Vec<T>, items: &[T]) -> usize {
+    if items.is_empty() {
+        return 0;
+    }
+    if let Some(start) = pool.windows(items.len()).position(|w| w == items) {
+        return start;
+    }
+    pool.extend_from_slice(items);
+    pool.len() - items.len()
+}
+
+/// The glyphs as `PathGlyph`s over one static of points and one of contour ends, each glyph a
+/// range of both, shared with any glyph whose values are the same. All three are named statics:
+/// a linker script may place anonymous and mergeable constants in RAM, and esp-hal's does.
+fn glyphs_to_tokens(glyphs: &[&Glyph]) -> proc_macro2::TokenStream {
+    let (mut points, mut contours) = (Vec::new(), Vec::new());
+    let glyphs = glyphs.iter().map(|glyph| {
+        let bits: Vec<[u32; 2]> = glyph.points().iter().map(|p| p.map(f32::to_bits)).collect();
+        let point_start = share(&mut points, &bits);
+        let contour_start = share(&mut contours, glyph.contours());
+        let (point_len, contour_len) = (bits.len(), glyph.contours().len());
+        let (advance_width, advance_height) = (glyph.advance_width(), glyph.advance_height());
+        let OutlineBounds {
+            xmin,
+            ymin,
+            width,
+            height,
+        } = glyph.bounds();
+        // SAFETY (of the emitted code): the points and bounds are a `Glyph`'s that the font
+        // outlined, and each range holds exactly that glyph's values.
+        quote! {
+            unsafe {
+                ::fontdue::PathGlyph::new(
+                    range(&POINTS, #point_start, #point_len),
+                    range(&CONTOURS, #contour_start, #contour_len),
+                    ::fontdue::OutlineBounds {
+                        xmin: #xmin,
+                        ymin: #ymin,
+                        width: #width,
+                        height: #height,
+                    },
+                    #advance_width,
+                    #advance_height,
+                )
+            }
         }
+    });
+    let glyphs = glyphs.collect::<Vec<_>>();
+    let glyph_count = glyphs.len();
+    let point_count = points.len();
+    let contour_count = contours.len();
+    let points = points.iter().map(|p| p.map(f32::from_bits)).map(|[x, y]| quote! { [#x, #y] });
+    quote! {
+        static POINTS: [[f32; 2]; #point_count] = [#(#points),*];
+        static CONTOURS: [u32; #contour_count] = [#(#contours),*];
+        const fn range<T>(all: &'static [T], start: usize, len: usize) -> &'static [T] {
+            all.split_at(start).1.split_at(len).0
+        }
+        static GLYPHS: [::fontdue::PathGlyph<'static>; #glyph_count] = [#(#glyphs),*];
     }
 }
 
@@ -220,16 +254,14 @@ fn fontdue_font_from_file_impl(
     let (glyph_items, glyph_methods) = if store {
         store_items(&font, &glyph_indices, grid.unwrap_or(16), &type_name)
     } else {
-        let glyphs =
-            glyph_indices.iter().map(|index| glyph_to_tokens(&font.internal_glyph_slice()[*index as usize]));
+        let glyphs = glyph_indices.iter().map(|index| &font.internal_glyph_slice()[*index as usize]);
+        let glyphs = glyphs_to_tokens(&glyphs.collect::<Vec<_>>());
         (
             quote! {},
             quote! {
                 #[inline(always)]
                 fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
-                    static GLYPHS: &'static [::fontdue::PathGlyph<'static>] = &[
-                        #(#glyphs),*
-                    ];
+                    #glyphs
                     GLYPHS[index as usize].into()
                 }
             },

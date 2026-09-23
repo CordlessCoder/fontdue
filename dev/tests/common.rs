@@ -249,3 +249,129 @@ fn sources_render_like_stored_lines() {
         }
     }
 }
+
+fontdue_font_from_file!(StoreRoboto, "../resources/fonts/Roboto-Regular.ttf", scale: 32, store: true);
+
+/// A store baked by the macro renders within the quantization's error of the raw baked lines, at
+/// the same bitmap size.
+#[test]
+fn store_renders_within_tolerance_of_raw_baked() {
+    let (raw, store) = (BakedRoboto, StoreRoboto);
+    assert_eq!(raw.glyph_count(), store.glyph_count());
+    let (mut a, mut b) = (fontdue::raster::Raster::empty(), fontdue::raster::Raster::empty());
+    let (mut max, mut sum, mut n) = (0u8, 0u64, 0u64);
+    for index in 0..raw.glyph_count() {
+        for px in [12.0, 32.0, 64.0] {
+            let (ma, ba) = raw.rasterize_indexed(&mut a, index, px);
+            let (mb, bb) = store.rasterize_indexed(&mut b, index, px);
+            assert_eq!((ma.width, ma.height), (mb.width, mb.height), "glyph {index} at {px} px");
+            for (x, y) in ba.zip(bb) {
+                let d = x.abs_diff(y);
+                max = max.max(d);
+                sum += d as u64;
+                n += 1;
+            }
+        }
+    }
+    let mean = sum as f64 / n as f64;
+    // Measured at max 1, mean 0.0026 on a 1/16 grid.
+    assert!(max <= 1 && mean < 0.003, "max {max}, mean {mean}");
+}
+
+/// The macro's generic override and `GlyphRef`'s dynamic dispatch draw the same bytes.
+#[test]
+fn store_generic_and_dyn_agree() {
+    let font = StoreRoboto;
+    let (mut a, mut b) = (fontdue::raster::Raster::empty(), fontdue::raster::Raster::empty());
+    for index in 0..font.glyph_count() {
+        for (px, stretch) in [(12.0, 1.0), (32.0, 1.0), (32.0, 3.0)] {
+            let generic: Vec<u8> = if stretch == 1.0 {
+                font.rasterize_indexed(&mut a, index, px).1.collect()
+            } else {
+                font.rasterize_indexed_subpixel(&mut a, index, px).1.collect()
+            };
+            let glyph = font.get_glyph_at_index(index);
+            fontdue::rasterize_inner(&mut b, &glyph, font.scale_factor(px), stretch);
+            assert_eq!(
+                generic,
+                b.get_bitmap_iter().collect::<Vec<u8>>(),
+                "glyph {index} at {px} px x{stretch}"
+            );
+        }
+    }
+}
+
+/// A store encoded at run time, as the macro does, and viewed as the words the decoder reads.
+fn encoded_roboto() -> Vec<u32> {
+    use fontdue::store::encode;
+    let font = roboto();
+    let inputs: Vec<_> = font.internal_glyph_slice().iter().map(|g| encode::glyph_input(g, 4)).collect();
+    encode::encode(&inputs, 4).chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+fn store_check(words: &[u32]) -> Option<fontdue::store::Error> {
+    // SAFETY: reinterpreting initialized u32s as their bytes, with u32 alignment.
+    let view = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
+    fontdue::store::Store::new(view).err()
+}
+
+/// Every decoded point lies inside its glyph's bounds. The raster is sized from the bounds and
+/// writes without checks, so a point outside them would write out of bounds.
+#[test]
+fn store_points_lie_inside_bounds() {
+    use fontdue::store::Store;
+    let words = encoded_roboto();
+    // SAFETY: as in `store_check`.
+    let view = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
+    let store = Store::new(view).unwrap();
+    for g in 0..store.glyph_count() {
+        let b = store.grid_bounds(g);
+        for [x0, y0, x1, y1] in store.lines(g) {
+            for (x, y) in [(x0, y0), (x1, y1)] {
+                assert!((0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y), "glyph {g}");
+            }
+            assert_ne!(y0, y1, "glyph {g} yielded a segment with no vertical extent");
+        }
+    }
+}
+
+/// `Store::new`'s walk is what makes the unchecked reads and writes sound, so it has to reject a
+/// store whose decoding would leave the stream or whose points would leave their bounds. So must a
+/// malformed table, which every constructor checks.
+#[test]
+fn corrupt_stores_are_rejected() {
+    use fontdue::store::{Error, Store};
+    let words = encoded_roboto();
+    assert_eq!(store_check(&words), None, "the unmodified store must parse");
+    // SAFETY: as in `store_check`.
+    let view = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
+    let store = Store::new(view).unwrap();
+    let parts = store.parts();
+    let word_of = |s: &[u32]| (s.as_ptr() as usize - words.as_ptr() as usize) / 4;
+    let (pools_at, glyphs_at, stream_at) =
+        (word_of(parts.pool_offsets), word_of(parts.glyphs), word_of(parts.words));
+
+    let mut far_pool = words.clone();
+    far_pool[pools_at] = u32::MAX;
+    assert_eq!(store_check(&far_pool), Some(Error::Corrupt));
+
+    let mut far_glyph = words.clone();
+    far_glyph[glyphs_at] = 0x7fff_fff0;
+    assert_eq!(store_check(&far_glyph), Some(Error::Corrupt));
+
+    // Two stream words, with the length field to match, so real glyphs overrun.
+    let mut short = words[..stream_at + 2].to_vec();
+    short[stream_at - 1] = 2;
+    assert_eq!(store_check(&short), Some(Error::Corrupt));
+
+    // A recorded size smaller than the points reach: the raster is sized from it. Five words per
+    // glyph record, the size fourth.
+    let g = (0..store.glyph_count()).find(|&g| store.lines(g).next().is_some()).unwrap() as usize;
+    let mut small = words.clone();
+    small[glyphs_at + 5 * g + 3] = 0;
+    assert_eq!(store_check(&small), Some(Error::Corrupt));
+
+    let mut empty_model = words.clone();
+    empty_model[2] = 0;
+    assert_eq!(store_check(&empty_model), Some(Error::BadModel));
+}

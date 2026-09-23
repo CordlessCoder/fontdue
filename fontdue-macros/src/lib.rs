@@ -107,6 +107,8 @@ fn fontdue_font_from_file_impl(
     let ttf_data = std::fs::read(path).unwrap();
     let mut settings = fontdue::FontSettings::default();
     let mut subset_chars = None;
+    let mut store = false;
+    let mut grid: Option<u32> = None;
 
     if tokens.clone().next().is_some_and(|t| matches!(t, TokenTree::Punct(punct) if punct.as_char() == ',')) {
         _ = tokens.next();
@@ -138,6 +140,23 @@ fn fontdue_font_from_file_impl(
                     chars.sort_unstable();
                     chars.dedup();
                     subset_chars = Some(chars);
+                }
+                "store" => {
+                    assert!(matches!(tokens.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':'));
+                    store = match tokens.next() {
+                        Some(TokenTree::Ident(b)) if b == "true" => true,
+                        Some(TokenTree::Ident(b)) if b == "false" => false,
+                        _ => panic!("Expected true or false to follow store:"),
+                    };
+                }
+                "grid" => {
+                    assert!(matches!(tokens.next(), Some(TokenTree::Punct(p)) if p.as_char() == ':'));
+                    let TokenTree::Literal(lit) = tokens.next().unwrap() else {
+                        panic!("Expected an integer literal to follow grid:")
+                    };
+                    let g: u32 = lit.to_string().parse().expect("grid: expects an integer, such as 16");
+                    assert!(g.is_power_of_two() && g <= 1 << 16, "grid: must be a power of two up to 65536");
+                    grid = Some(g);
                 }
                 _ => unimplemented!(),
             },
@@ -213,9 +232,28 @@ fn fontdue_font_from_file_impl(
         })),
     };
     let glyph_count = glyph_indices.len() as u16;
-    let glyphs =
-        glyph_indices.iter().map(|index| glyph_to_tokens(&font.internal_glyph_slice()[*index as usize]));
+    assert!(store || grid.is_none(), "grid: only applies with store: true");
+    let (glyph_items, glyph_methods) = if store {
+        store_items(&font, &glyph_indices, grid.unwrap_or(16), &type_name)
+    } else {
+        let glyphs =
+            glyph_indices.iter().map(|index| glyph_to_tokens(&font.internal_glyph_slice()[*index as usize]));
+        (
+            quote! {},
+            quote! {
+                #[inline(always)]
+                fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
+                    static GLYPHS: &'static [::fontdue::LineGlyph<'static>] = &[
+                        #(#glyphs),*
+                    ];
+                    GLYPHS[index as usize].into()
+                }
+            },
+        )
+    };
     quote! {
+        #glyph_items
+
         #[derive(Clone, Copy)]
         pub struct #type_name;
 
@@ -260,13 +298,7 @@ fn fontdue_font_from_file_impl(
                 }
             }
 
-            #[inline(always)]
-            fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
-                static GLYPHS: &'static [::fontdue::LineGlyph<'static>] = &[
-                    #(#glyphs),*
-                ];
-                GLYPHS[index as usize].into()
-            }
+            #glyph_methods
 
             /// Gets the total glyphs in the font.
             #[inline(always)]
@@ -275,4 +307,80 @@ fn fontdue_font_from_file_impl(
             }
         }
     }
+}
+
+/// The store-backed half of a baked font: the store's tables as statics, and the `FontRepr`
+/// methods that draw from them.
+fn store_items(
+    font: &fontdue::Font,
+    glyph_indices: &[u16],
+    grid: u32,
+    type_name: &proc_macro2::Ident,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    use fontdue::store::{Store, encode};
+    let shift = grid.trailing_zeros() as u8;
+    let inputs: Vec<encode::GlyphInput> = glyph_indices
+        .iter()
+        .map(|&index| encode::glyph_input(&font.internal_glyph_slice()[index as usize], shift))
+        .collect();
+    let bytes = encode::encode(&inputs, shift);
+    let words: Vec<u32> = bytes.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    // SAFETY: reinterpreting initialized u32s as their bytes, which is how the store reads them.
+    let view = unsafe { std::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
+    // The full checked walk, here rather than on the device: every read inside the stream, every
+    // point inside its glyph's bounds. The emitted store is exactly these parts.
+    let store = Store::new(view).unwrap_or_else(|e| panic!("the encoded store failed its own check: {e:?}"));
+    let p = store.parts();
+    let (grid_value, id_bits, xy_bits, glyph_count, pool_count) =
+        (p.grid, p.id_bits, p.xy_bits, p.glyph_count, p.pool_count);
+    let (counts, bits, fast) = (p.step_counts, p.step_bits, p.step_fast);
+    let (pool_offsets, glyphs, stream) = (p.pool_offsets, p.glyphs, p.words);
+    let name = quote::format_ident!("__FONTDUE_STORE_{}", type_name);
+    let items = quote! {
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        // SAFETY: these parts come from a store the macro built and checked with `Store::new`.
+        static #name: ::fontdue::store::Store<'static> = unsafe {
+            ::fontdue::store::Store::from_parts(::fontdue::store::Parts {
+                grid: #grid_value,
+                id_bits: #id_bits,
+                xy_bits: #xy_bits,
+                glyph_count: #glyph_count,
+                pool_count: #pool_count,
+                step_counts: [#(#counts),*],
+                step_bits: &[#(#bits),*],
+                step_fast: &[#(#fast),*],
+                pool_offsets: &[#(#pool_offsets),*],
+                glyphs: &[#(#glyphs),*],
+                words: &[#(#stream),*],
+            })
+        };
+    };
+    let methods = quote! {
+        #[inline]
+        fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
+            ::fontdue::GlyphRef::from_source(&#name, index)
+        }
+
+        #[inline]
+        fn rasterize_indexed<'r>(
+            &self,
+            canvas: &'r mut ::fontdue::raster::Raster<'_>,
+            index: u16,
+            px: f32,
+        ) -> (::fontdue::Metrics, ::fontdue::raster::BitmapIter<'r>) {
+            ::fontdue::font::rasterize_source_indexed(canvas, &#name, index, px, self.scale_factor(px), 1.0)
+        }
+
+        #[inline]
+        fn rasterize_indexed_subpixel<'r>(
+            &self,
+            canvas: &'r mut ::fontdue::raster::Raster<'_>,
+            index: u16,
+            px: f32,
+        ) -> (::fontdue::Metrics, ::fontdue::raster::BitmapIter<'r>) {
+            ::fontdue::font::rasterize_source_indexed(canvas, &#name, index, px, self.scale_factor(px), 3.0)
+        }
+    };
+    (items, methods)
 }

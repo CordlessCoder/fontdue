@@ -77,10 +77,14 @@ impl<'a> Raster<'a> {
     }
 
     pub(crate) fn resize(&mut self, w: usize, h: usize) {
-        // Checked, because `add` indexes with `get_unchecked_mut` off `w` and `h`. A wrapped
-        // length would leave the buffer shorter than the dimensions the raster then trusts.
-        let len =
-            w.checked_mul(h).and_then(|area| area.checked_add(3)).expect("raster dimensions overflow usize");
+        // The line walk writes without bounds checks off `w` and `h`, computing cell indices in
+        // `i32`. A wrapped length would leave the buffer shorter than the dimensions it trusts,
+        // and a wrapped index would write outside it.
+        let len = w
+            .checked_mul(h)
+            .and_then(|area| area.checked_add(3))
+            .filter(|&len| len <= i32::MAX as usize)
+            .expect("raster dimensions overflow i32");
         self.w = w;
         self.h = h;
         match &mut self.a {

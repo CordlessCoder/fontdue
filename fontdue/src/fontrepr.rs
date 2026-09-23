@@ -338,4 +338,11 @@ pub trait FontRepr {
     fn glyph_count(&self) -> u16;
 
     fn get_glyph_at_index(&self, index: u16) -> GlyphRef<'_>;
+
+    /// Calls `f` with the glyph at `index`, decoded once where a font decodes on demand. A cache
+    /// reads a glyph's info and outline through this.
+    #[doc(hidden)]
+    fn with_glyph_at_index(&self, index: u16, f: &mut dyn FnMut(&GlyphRef<'_>)) {
+        f(&self.get_glyph_at_index(index))
+    }
 }

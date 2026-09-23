@@ -135,6 +135,10 @@ impl FontRepr for LazyFont<'_> {
         GlyphRef::from_source(self, index)
     }
 
+    fn with_glyph_at_index(&self, index: u16, f: &mut dyn FnMut(&GlyphRef<'_>)) {
+        f(&GlyphRef::from_glyph(&self.glyph(index)))
+    }
+
     fn metrics_indexed(&self, index: u16, px: f32) -> Metrics {
         let scale = self.scale_factor(px);
         metrics_raw(scale, &GlyphRef::from_glyph(&self.glyph(index)), 0.0).0

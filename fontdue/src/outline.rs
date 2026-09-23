@@ -237,6 +237,16 @@ impl<'a> GlyphRef<'a> {
         self.info
     }
 
+    /// This glyph with `info` in place of its own. The points must lie inside `info`'s bounds,
+    /// which must be in the same units.
+    #[inline(always)]
+    pub(crate) fn with_info(self, info: OutlineInfo) -> Self {
+        GlyphRef {
+            info,
+            ..self
+        }
+    }
+
     /// The stored contours, when the glyph is not a source's.
     #[inline(always)]
     pub(crate) fn path(&self) -> Option<PathEvents<'a>> {

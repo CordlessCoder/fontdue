@@ -11,6 +11,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "cache")]
+mod cache;
 #[doc(hidden)]
 pub mod font;
 mod fontrepr;
@@ -29,6 +31,8 @@ mod table;
 mod transform;
 mod unicode;
 
+#[cfg(feature = "cache")]
+pub use crate::cache::Cached;
 pub use crate::font::*;
 pub use crate::lazy::LazyFont;
 pub use crate::outline::{

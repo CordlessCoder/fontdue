@@ -298,7 +298,12 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
 /// The metrics, and the subpixel offsets the draw adds to every point. Bounds and points are
 /// scaled by the same `scale * unit`, so a point inside the bounds lands inside the raster.
 #[inline(always)]
-fn metrics_raw_stretched(scale: f32, glyph: &OutlineInfo, offset: f32, stretch: f32) -> (Metrics, f32, f32) {
+pub(crate) fn metrics_raw_stretched(
+    scale: f32,
+    glyph: &OutlineInfo,
+    offset: f32,
+    stretch: f32,
+) -> (Metrics, f32, f32) {
     let bounds = glyph.bounds.scale(scale * glyph.unit);
     // Below 2^22 every value converted here is under 2^23, where a float has a fraction and its
     // conversions fit `i32`, so one check replaces the guard in each of eight conversions. NaN

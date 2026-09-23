@@ -25,6 +25,9 @@ std = []
 simd = []
 # Enable this flag to parallelize font loading using threads.
 parallel = ["rayon", "hashbrown", "hashbrown/rayon"]
+# Enable `Cached`, a glyph cache over any font. The build must provide a `critical-section`
+# implementation.
+cache = ["dep:critical-section"]
 
 [dependencies]
 ttf-parser = { version = "0.25", default-features = false, features = [
@@ -32,3 +35,7 @@ ttf-parser = { version = "0.25", default-features = false, features = [
 ] }
 hashbrown = { version = "0.17", optional = true }
 rayon = { version = "1.12", optional = true }
+critical-section = { version = "1.2", optional = true }
+
+[dev-dependencies]
+critical-section = { version = "1.2", features = ["std"] }

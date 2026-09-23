@@ -1,5 +1,5 @@
 pub use crate::platform::f32x4;
-use crate::platform::{self, abs, atan2, sqrt};
+use crate::platform::{self, abs, atan2, recip, sqrt};
 use crate::{Glyph, OutlineBounds};
 use alloc::vec;
 use alloc::vec::*;
@@ -282,6 +282,25 @@ impl Line {
 
     pub fn params(&self) -> [f32; 2] {
         self.params
+    }
+
+    /// As `new`, with the reciprocals from `platform::recip`, for lines built at draw time. On
+    /// Xtensa they can differ from `new`'s by 1 ulp.
+    #[inline(always)]
+    pub(crate) fn at_draw(start: Point, end: Point) -> Line {
+        let dx = end.x - start.x;
+        let dy = end.y - start.y;
+        Line {
+            coords: f32x4::new(start.x, start.y, end.x, end.y),
+            params: [
+                if dx == 0.0 {
+                    core::f32::MAX
+                } else {
+                    recip(dx)
+                },
+                recip(dy),
+            ],
+        }
     }
 
     #[inline(always)]

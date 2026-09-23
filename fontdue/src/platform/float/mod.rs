@@ -4,6 +4,7 @@ mod atan2;
 mod ceil;
 mod floor;
 mod fract;
+mod recip;
 mod sqrt;
 mod trunc;
 
@@ -13,6 +14,7 @@ pub use atan2::*;
 pub use ceil::*;
 pub use floor::*;
 pub use fract::*;
+pub use recip::*;
 pub use sqrt::*;
 #[allow(unused_imports)]
 pub use trunc::*;

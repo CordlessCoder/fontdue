@@ -28,7 +28,9 @@ mod transform;
 mod unicode;
 
 pub use crate::font::*;
-pub use crate::outline::{GlyphRef, LineGlyph, OutlineInfo, OutlineSource, SegmentSource};
+pub use crate::outline::{
+    GlyphRef, OutlineInfo, OutlineSource, PathEvent, PathGlyph, PathSource, SMALLEST_COORDINATE,
+};
 pub use crate::transform::{
     PenOffsets, Transform, TransformedMetrics, rasterize_source_transformed,
     rasterize_source_transformed_indexed, rasterize_transformed, transformed_raster_capacity,

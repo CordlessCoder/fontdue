@@ -7,9 +7,14 @@
 use crate::FontRepr;
 use crate::font::MAX_DIMENSION;
 use crate::math::{Line, Point};
-use crate::outline::{GlyphRef, OutlineInfo, SegmentSource};
+use crate::outline::{GlyphRef, OutlineInfo, PathEvent, PathSource};
 use crate::platform::{abs, as_i32_unchecked, ceil, floor, sqrt};
 use crate::raster::{BitmapIter, Raster, Sink};
+use core::mem::MaybeUninit;
+
+/// Points the transformed draw keeps from its measuring pass, 3 KB of stack. Octowhere's largest
+/// glyph has 70 segments; a larger glyph's first `count - RING` points are visited twice.
+const RING: usize = 256;
 
 /// A linear map in y-down device coordinates, applied about the pen point: `x' = a·x + b·y`,
 /// `y' = c·x + d·y`.
@@ -114,42 +119,57 @@ impl Map {
     }
 }
 
-/// A glyph's segments, visited once. The transformed draw takes two, one to measure the glyph
+/// A glyph's outline, visited once. The transformed draw takes two, one to measure the glyph
 /// and one to draw it, both made before the raster is sized.
-pub(crate) trait Segments {
-    fn each(self, f: impl FnMut([f32; 4]));
+pub(crate) trait Outline {
+    fn each(self, f: impl FnMut(PathEvent));
+
+    /// The first `n` events only. A streamed source stops decoding after them.
+    fn each_first(self, n: usize, f: impl FnMut(PathEvent));
 }
 
 pub(crate) struct Iter<I>(pub I);
 
-impl<I: Iterator<Item = [f32; 4]>> Segments for Iter<I> {
+impl<I: Iterator<Item = PathEvent>> Outline for Iter<I> {
     #[inline(always)]
-    fn each(self, mut f: impl FnMut([f32; 4])) {
-        for segment in self.0 {
-            f(segment);
+    fn each(self, mut f: impl FnMut(PathEvent)) {
+        for event in self.0 {
+            f(event);
+        }
+    }
+
+    #[inline(always)]
+    fn each_first(self, n: usize, mut f: impl FnMut(PathEvent)) {
+        for event in self.0.take(n) {
+            f(event);
         }
     }
 }
 
-impl Segments for &GlyphRef<'_> {
+impl Outline for &GlyphRef<'_> {
     #[inline(always)]
-    fn each(self, f: impl FnMut([f32; 4])) {
+    fn each(self, f: impl FnMut(PathEvent)) {
         self.visit(f)
     }
+
+    #[inline(always)]
+    fn each_first(self, n: usize, mut f: impl FnMut(PathEvent)) {
+        let mut index = 0;
+        self.visit(|event| {
+            if index < n {
+                f(event);
+            }
+            index += 1;
+        })
+    }
 }
 
-/// `v` clamped into `[0, hi]`, with NaN going to 0.
+/// `v` clamped into `[0, hi]`, for a finite `hi >= 0`. Non-negative floats order as their bits
+/// do as integers and negative ones as negative integers, so this is an integer max and min. A
+/// NaN lands at 0 or `hi` by its sign.
 #[inline(always)]
 fn clamp(v: f32, hi: f32) -> f32 {
-    if v >= 0.0 {
-        if v <= hi {
-            v
-        } else {
-            hi
-        }
-    } else {
-        0.0
-    }
+    f32::from_bits((v.to_bits() as i32).max(0).min(hi.to_bits() as i32) as u32)
 }
 
 /// Splits a pen coordinate into its whole-pixel part, as an `i32`, and its fraction.
@@ -176,8 +196,8 @@ fn rasterize_with(
     scale: f32,
     transform: Transform,
     pen: (f32, f32),
-    measure: impl Segments,
-    draw: impl Segments,
+    measure: impl Outline,
+    draw: impl Outline,
 ) -> TransformedMetrics {
     let (pen_x, fx) = split_pen(pen.0);
     let (pen_y, fy) = split_pen(pen.1);
@@ -185,13 +205,31 @@ fn rasterize_with(
 
     let (mut min_x, mut min_y, mut max_x, mut max_y) =
         (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    measure.each(|[x0, y0, x1, y1]| {
-        for (x, y) in [(x0, y0), (x1, y1)] {
-            let (qx, qy) = map.apply(x, y);
-            min_x = min_x.min(qx);
-            min_y = min_y.min(qy);
-            max_x = max_x.max(qx);
-            max_y = max_y.max(qy);
+    // The last `RING` points, transformed, with whether each starts a contour: point `i` is in
+    // slot `i % RING`. A glyph that fits is visited once, and one that does not is visited again
+    // only up to where the ring starts, so a streamed source decodes nothing after that twice.
+    // Written before read, in slots `first..count` modulo `RING`.
+    let mut ring = [MaybeUninit::<([f32; 2], bool)>::uninit(); RING];
+    let mut count = 0;
+    measure.each(|event| {
+        let ([x, y], start) = match event {
+            PathEvent::MoveTo(p) => (p, true),
+            PathEvent::LineTo(p) => (p, false),
+        };
+        let (qx, qy) = map.apply(x, y);
+        ring[count % RING].write(([qx, qy], start));
+        count += 1;
+        if qx < min_x {
+            min_x = qx;
+        }
+        if qx > max_x {
+            max_x = qx;
+        }
+        if qy < min_y {
+            min_y = qy;
+        }
+        if qy > max_y {
+            max_y = qy;
         }
     });
     if !(min_x <= max_x) {
@@ -230,16 +268,41 @@ fn rasterize_with(
     };
     canvas.resize(width, height);
     let mut sink = Sink::new(canvas, 1.0, 1.0, 0.0, 0.0);
-    draw.each(|[x0, y0, x1, y1]| {
-        let place = |x: f32, y: f32| {
-            let (qx, qy) = map.apply(x, y);
-            // The same map as the measuring pass, so the clamp is a no-op there; it is what makes
-            // the walk stay in bounds when a source yields something else the second time.
-            debug_assert!(qx - ox >= 0.0 && qx - ox <= w && qy - oy >= 0.0 && qy - oy <= h);
-            Point::new(clamp(qx - ox, w), clamp(qy - oy, h))
+    let first = count.saturating_sub(RING);
+    // Before the first `MoveTo` the previous point is the raster's corner, which is inside it.
+    let mut last = Point::new(0.0, 0.0);
+    if first > 0 {
+        // The points the ring overwrote, from a second visit that stops where the ring begins.
+        // The origin is folded into the map, so the walk holds six floats across points rather
+        // than ten; with ten the crossing loop ran a register short. The fold rounds differently
+        // from the measuring pass, which the clamp absorbs.
+        let map = Map {
+            cx: map.cx - ox,
+            cy: map.cy - oy,
+            ..map
         };
-        sink.placed(place(x0, y0), place(x1, y1));
-    });
+        draw.each_first(first, |event| {
+            let ([x, y], start) = match event {
+                PathEvent::MoveTo(p) => (p, true),
+                PathEvent::LineTo(p) => (p, false),
+            };
+            let (qx, qy) = map.apply(x, y);
+            let p = Point::new(clamp(qx, w), clamp(qy, h));
+            if !start {
+                sink.placed(last, p);
+            }
+            last = p;
+        });
+    }
+    for k in first..count {
+        // SAFETY: the measuring pass wrote slot `k % RING` for every `k` in `first..count`.
+        let ([qx, qy], start) = unsafe { ring[k % RING].assume_init() };
+        let p = Point::new(clamp(qx - ox, w), clamp(qy - oy, h));
+        if !start {
+            sink.placed(last, p);
+        }
+        last = p;
+    }
     metrics
 }
 
@@ -262,7 +325,7 @@ pub fn rasterize_transformed(
 
 /// [`rasterize_transformed`] for one glyph of `source`, monomorphized over it.
 #[inline(always)]
-pub fn rasterize_source_transformed<S: SegmentSource + ?Sized>(
+pub fn rasterize_source_transformed<S: PathSource + ?Sized>(
     canvas: &mut Raster<'_>,
     source: &S,
     glyph: u16,
@@ -270,7 +333,7 @@ pub fn rasterize_source_transformed<S: SegmentSource + ?Sized>(
     transform: Transform,
     pen: (f32, f32),
 ) -> TransformedMetrics {
-    let (measure, draw) = (source.segments(glyph), source.segments(glyph));
+    let (measure, draw) = (source.points(glyph), source.points(glyph));
     rasterize_with(canvas, &source.info(glyph), scale, transform, pen, Iter(measure), Iter(draw))
 }
 
@@ -278,7 +341,7 @@ pub fn rasterize_source_transformed<S: SegmentSource + ?Sized>(
 /// backs with a store. `scale` is the font's `scale_factor(px)`.
 #[doc(hidden)]
 #[inline]
-pub fn rasterize_source_transformed_indexed<'r, S: SegmentSource + ?Sized>(
+pub fn rasterize_source_transformed_indexed<'r, S: PathSource + ?Sized>(
     canvas: &'r mut Raster<'_>,
     source: &S,
     glyph: u16,
@@ -384,4 +447,45 @@ pub fn transformed_raster_capacity<F: FontRepr + ?Sized>(
         most = most.max(side.checked_mul(side).expect("raster dimensions overflow usize"));
     }
     most.checked_add(3).expect("raster dimensions overflow usize")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp;
+
+    /// The integer clamp against the float comparison it replaces, NaN included.
+    #[test]
+    fn clamp_matches_float_comparison() {
+        let values = [
+            0.0,
+            -0.0,
+            1e-40,
+            -1e-40,
+            0.5,
+            1.0,
+            6.99,
+            7.0,
+            7.01,
+            -3.0,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for hi in [0.0f32, 1.0, 7.0, 1e30] {
+            for v in values {
+                let want = if v >= 0.0 {
+                    v.min(hi)
+                } else {
+                    0.0
+                };
+                // As floats: the clamp gives +0.0 for -0.0, the same coordinate.
+                assert_eq!(clamp(v, hi), want, "{v} into [0, {hi}]");
+            }
+            for nan in [f32::NAN, -f32::NAN] {
+                let got = clamp(nan, hi);
+                assert!(got == 0.0 || got == hi, "{nan} into [0, {hi}] gave {got}");
+            }
+        }
+    }
 }

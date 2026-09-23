@@ -4,7 +4,7 @@ use super::{
     Bounds, FAST_BITS, GLYPH_SHIFT, MAX_BITS, MAX_CODE_LEN, PADDING_WORDS, POOL_SHIFT, STEP_ESCAPE,
     STEP_SLOW, VERSION,
 };
-use crate::{Glyph, HashMap, HashSet};
+use crate::{Glyph, HashMap};
 use alloc::collections::BinaryHeap;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -350,48 +350,25 @@ pub fn glyph_input(g: &Glyph, grid_shift: u8) -> GlyphInput {
     }
 }
 
-/// The glyph's lines as chains of points quantized to `2^-grid_shift` font units, and bounds
-/// computed from the quantized points. Lines are joined where one ends exactly where another
-/// starts, which approximates contour order.
+/// The glyph's contours as chains of points quantized to `2^-grid_shift` font units, and bounds
+/// computed from the quantized points. Quantizing can make neighbouring points equal; the
+/// repeats are dropped, and so is a contour left with one point.
 pub fn chains(g: &Glyph, grid_shift: u8) -> (Vec<Vec<(i32, i32)>>, Bounds) {
-    let segs: Vec<((f32, f32), (f32, f32))> = g
-        .v_lines()
-        .iter()
-        .chain(g.m_lines())
-        .chain(g.h_lines())
-        .map(|l| {
-            let (a, b, c, d) = l.coords().copied();
-            ((a, b), (c, d))
-        })
-        .collect();
-    let key = |p: (f32, f32)| ((p.0.to_bits() as u64) << 32) | p.1.to_bits() as u64;
-    let mut by_start: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, s) in segs.iter().enumerate() {
-        by_start.entry(key(s.0)).or_default().push(i);
-    }
-    let ends: HashSet<u64> = segs.iter().map(|s| key(s.1)).collect();
-    let mut used = vec![false; segs.len()];
     let scale = (1u32 << grid_shift) as f64;
-    let q = |p: (f32, f32)| (round(p.0 as f64 * scale), round(p.1 as f64 * scale));
+    let q = |p: [f32; 2]| (round(p[0] as f64 * scale), round(p[1] as f64 * scale));
     let mut out = Vec::new();
-    let order: Vec<usize> =
-        (0..segs.len()).filter(|&i| !ends.contains(&key(segs[i].0))).chain(0..segs.len()).collect();
-    for i in order {
-        if used[i] {
-            continue;
-        }
-        let mut pts = vec![q(segs[i].0)];
-        let mut cur = i;
-        loop {
-            used[cur] = true;
-            pts.push(q(segs[cur].1));
-            match by_start.get(&key(segs[cur].1)).and_then(|v| v.iter().copied().find(|&j| !used[j])) {
-                Some(j) => cur = j,
-                None => break,
+    crate::outline::each_contour(g.points(), g.contours(), |&first, rest| {
+        let mut chain = vec![q(first)];
+        for &p in rest {
+            let p = q(p);
+            if chain.last() != Some(&p) {
+                chain.push(p);
             }
         }
-        out.push(pts);
-    }
+        if chain.len() >= 2 {
+            out.push(chain);
+        }
+    });
     let (mut w, mut h) = (0i32, 0i32);
     for &(x, y) in out.iter().flatten() {
         assert!(x >= 0 && y >= 0, "points are relative to the bounding box and cannot be negative");

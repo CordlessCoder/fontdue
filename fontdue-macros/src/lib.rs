@@ -32,41 +32,22 @@ fn line_metrics_to_tokens(lm: &LineMetrics) -> proc_macro2::TokenStream {
         }
     }
 }
-fn f32x4_to_tokens(val: &fontdue::math::f32x4) -> proc_macro2::TokenStream {
-    let (a, b, c, d) = val.copied();
-    quote! {
-        ::fontdue::math::f32x4::new(#a, #b, #c, #d)
-    }
-}
-fn line_to_tokens(line: &fontdue::math::Line) -> proc_macro2::TokenStream {
-    let coords = f32x4_to_tokens(&line.coords());
-    let [tdx, tdy] = line.params();
-    // SAFETY (of the emitted code): the parts come from a `Line` the font built.
-    quote! {
-        unsafe { ::fontdue::math::Line::from_parts(#coords, [#tdx, #tdy]) }
-    }
-}
 fn glyph_to_tokens(glyph: &Glyph) -> proc_macro2::TokenStream {
-    let (v_lines, m_lines, h_lines, bounds) =
-        (glyph.v_lines(), glyph.m_lines(), glyph.h_lines(), glyph.bounds());
     let (advance_width, advance_height) = (glyph.advance_width(), glyph.advance_height());
     let OutlineBounds {
         xmin,
         ymin,
         width,
         height,
-    } = bounds;
-
-    let v_lines = v_lines.iter().map(line_to_tokens);
-    let m_lines = m_lines.iter().map(line_to_tokens);
-    let h_lines = h_lines.iter().map(line_to_tokens);
-    // SAFETY (of the emitted code): the lines and bounds are a `Glyph`'s that the font outlined.
+    } = glyph.bounds();
+    let points = glyph.points().iter().map(|[x, y]| quote! { [#x, #y] });
+    let contours = glyph.contours();
+    // SAFETY (of the emitted code): the points and bounds are a `Glyph`'s that the font outlined.
     quote! {
         unsafe {
-            ::fontdue::LineGlyph::new(
-                &[#(#v_lines),*],
-                &[#(#m_lines),*],
-                &[#(#h_lines),*],
+            ::fontdue::PathGlyph::new(
+                &[#(#points),*],
+                &[#(#contours),*],
                 ::fontdue::OutlineBounds {
                     xmin: #xmin,
                     ymin: #ymin,
@@ -246,7 +227,7 @@ fn fontdue_font_from_file_impl(
             quote! {
                 #[inline(always)]
                 fn get_glyph_at_index(&self, index: u16) -> ::fontdue::GlyphRef<'_> {
-                    static GLYPHS: &'static [::fontdue::LineGlyph<'static>] = &[
+                    static GLYPHS: &'static [::fontdue::PathGlyph<'static>] = &[
                         #(#glyphs),*
                     ];
                     GLYPHS[index as usize].into()

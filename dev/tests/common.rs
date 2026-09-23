@@ -171,13 +171,31 @@ fn extreme_but_valid_px_still_renders() {
     }
 }
 
-/// Replays a font's own lines as a streaming source, in half font units so the unit is exercised.
-/// Vertical lines go first, as the stored-lines path draws them, so renders must match exactly.
+/// Replays a font's own contours as a streaming source, in half font units so the unit is
+/// exercised. Halving is exact, so renders must match the stored points exactly.
 struct ReplayedFont(Font);
 
-// SAFETY: the points are the font's own lines, which lie inside its bounds, halved along with the
-// bounds. Halving is exact. `Geometry` drops lines with no vertical extent, and Roboto's deltas
-// are far from subnormal.
+/// A glyph's contours as path events, with every coordinate scaled by `k`.
+fn events(g: &fontdue::Glyph, k: f32) -> Vec<fontdue::PathEvent> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for &end in g.contours() {
+        for (i, &[x, y]) in g.points()[start..end as usize].iter().enumerate() {
+            let p = [x * k, y * k];
+            out.push(if i == 0 {
+                fontdue::PathEvent::MoveTo(p)
+            } else {
+                fontdue::PathEvent::LineTo(p)
+            });
+        }
+        start = end as usize;
+    }
+    out
+}
+
+// SAFETY: the points are the font's own, which lie inside its bounds, halved along with the
+// bounds. Halving is exact, and `sources_render_like_stored_lines` checks that every coordinate
+// stays zero or at least `SMALLEST_COORDINATE` after it.
 unsafe impl fontdue::OutlineSource for ReplayedFont {
     fn info(&self, glyph: u16) -> fontdue::OutlineInfo {
         let g = &self.0.internal_glyph_slice()[glyph as usize];
@@ -196,34 +214,70 @@ unsafe impl fontdue::OutlineSource for ReplayedFont {
     }
 
     fn draw(&self, glyph: u16, sink: &mut fontdue::raster::Sink<'_, '_>) {
-        for segment in fontdue::SegmentSource::segments(self, glyph) {
-            sink.segment(segment);
+        for event in fontdue::PathSource::points(self, glyph) {
+            match event {
+                fontdue::PathEvent::MoveTo(p) => sink.move_to(p),
+                fontdue::PathEvent::LineTo(p) => sink.line_to(p),
+            }
         }
     }
 
-    fn visit(&self, glyph: u16, f: &mut dyn FnMut([f32; 4])) {
-        for segment in fontdue::SegmentSource::segments(self, glyph) {
-            f(segment);
+    fn visit(&self, glyph: u16, f: &mut dyn FnMut(fontdue::PathEvent)) {
+        for event in fontdue::PathSource::points(self, glyph) {
+            f(event);
         }
     }
 }
 
-// SAFETY: the same segments `draw` passes, which lie inside the halved bounds.
-unsafe impl fontdue::SegmentSource for ReplayedFont {
-    type Segments<'a> = Box<dyn Iterator<Item = [f32; 4]> + 'a>;
+// SAFETY: the same outline `draw` passes, which lies inside the halved bounds.
+unsafe impl fontdue::PathSource for ReplayedFont {
+    type Points<'a> = std::vec::IntoIter<fontdue::PathEvent>;
 
-    fn segments(&self, glyph: u16) -> Self::Segments<'_> {
-        let g = &self.0.internal_glyph_slice()[glyph as usize];
-        Box::new(g.v_lines().iter().chain(g.m_lines()).chain(g.h_lines()).map(|line| {
-            let (x0, y0, x1, y1) = line.coords().copied();
-            [x0 / 2.0, y0 / 2.0, x1 / 2.0, y1 / 2.0]
-        }))
+    fn points(&self, glyph: u16) -> Self::Points<'_> {
+        events(&self.0.internal_glyph_slice()[glyph as usize], 0.5).into_iter()
     }
+}
+
+/// The segments a path draws: each `LineTo` from the point before it.
+fn segments(events: impl Iterator<Item = fontdue::PathEvent>) -> Vec<[f32; 4]> {
+    let (mut out, mut last) = (Vec::new(), [0.0, 0.0]);
+    for event in events {
+        match event {
+            fontdue::PathEvent::MoveTo(p) => last = p,
+            fontdue::PathEvent::LineTo(p) => {
+                out.push([last[0], last[1], p[0], p[1]]);
+                last = p;
+            }
+        }
+    }
+    out
+}
+
+/// Contours that do not end on their first point.
+fn open_contours(events: impl Iterator<Item = fontdue::PathEvent>) -> usize {
+    let (mut open, mut first, mut last) = (0, None, [0.0f32, 0.0]);
+    for event in events {
+        match event {
+            fontdue::PathEvent::MoveTo(p) => {
+                open += first.is_some_and(|f| f != last) as usize;
+                (first, last) = (Some(p), p);
+            }
+            fontdue::PathEvent::LineTo(p) => last = p,
+        }
+    }
+    open + first.is_some_and(|f| f != last) as usize
 }
 
 #[test]
 fn sources_render_like_stored_lines() {
     let font = roboto();
+    for g in font.internal_glyph_slice() {
+        for &[x, y] in g.points() {
+            for v in [x / 2.0, y / 2.0] {
+                assert!(v == 0.0 || v >= fontdue::SMALLEST_COORDINATE, "ReplayedFont breaks its contract");
+            }
+        }
+    }
     let source = ReplayedFont(roboto());
     let (mut want, mut generic, mut dynamic) = (
         fontdue::raster::Raster::empty(),
@@ -334,7 +388,7 @@ fn store_points_lie_inside_bounds() {
     let store = Store::new(view).unwrap();
     for g in 0..store.glyph_count() {
         let b = store.grid_bounds(g);
-        for [x0, y0, x1, y1] in store.lines(g) {
+        for [x0, y0, x1, y1] in segments(store.points(g)) {
             for (x, y) in [(x0, y0), (x1, y1)] {
                 assert!((0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y), "glyph {g}");
             }
@@ -376,7 +430,7 @@ fn corrupt_stores_are_rejected() {
 
     // A recorded size smaller than the points reach: the raster is sized from it. Five words per
     // glyph record, the size fourth.
-    let g = (0..store.glyph_count()).find(|&g| store.lines(g).next().is_some()).unwrap() as usize;
+    let g = (0..store.glyph_count()).find(|&g| store.points(g).next().is_some()).unwrap() as usize;
     let mut small = words.clone();
     small[glyphs_at + 5 * g + 3] = 0;
     assert_eq!(store_check(&small), Some(Error::Corrupt));
@@ -384,17 +438,6 @@ fn corrupt_stores_are_rejected() {
     let mut empty_model = words.clone();
     empty_model[2] = 0;
     assert_eq!(store_check(&empty_model), Some(Error::BadModel));
-}
-
-/// Adds each segment's start and subtracts its end, keyed by the point's bits. A set of closed
-/// contours leaves every count at zero.
-fn open_ends(segments: impl Iterator<Item = [f32; 4]>) -> usize {
-    let mut degree: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
-    for [x0, y0, x1, y1] in segments {
-        *degree.entry((x0.to_bits(), y0.to_bits())).or_default() += 1;
-        *degree.entry((x1.to_bits(), y1.to_bits())).or_default() -= 1;
-    }
-    degree.values().filter(|&&d| d != 0).count()
 }
 
 /// A transformed draw gives horizontal edges vertical extent, so every source has to keep them:
@@ -411,23 +454,11 @@ fn every_glyph_is_closed_contours() {
         let font = Font::from_bytes(std::fs::read(&path).unwrap(), FontSettings::default()).unwrap();
         for (i, g) in font.internal_glyph_slice().iter().enumerate() {
             let b = g.bounds();
-            for line in g.h_lines() {
-                let (x0, y0, x1, y1) = line.coords().copied();
-                assert!(y0 == y1 && x0 != x1, "{path:?} glyph {i}");
-                for (x, y) in [(x0, y0), (x1, y1)] {
-                    assert!(
-                        (0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y),
-                        "{path:?} glyph {i}"
-                    );
-                }
+            for &[x, y] in g.points() {
+                assert!((0.0..=b.width).contains(&x) && (0.0..=b.height).contains(&y), "{path:?} glyph {i}");
             }
-            horizontal += g.h_lines().len();
-            let lines = g.v_lines().iter().chain(g.m_lines()).chain(g.h_lines());
-            let segments = lines.map(|l| {
-                let (x0, y0, x1, y1) = l.coords().copied();
-                [x0, y0, x1, y1]
-            });
-            assert_eq!(open_ends(segments), 0, "{path:?} glyph {i}");
+            horizontal += segments(events(g, 1.0).into_iter()).iter().filter(|s| s[1] == s[3]).count();
+            assert_eq!(open_contours(events(g, 1.0).into_iter()), 0, "{path:?} glyph {i}");
         }
     }
     assert!(horizontal > 0);
@@ -438,6 +469,6 @@ fn every_glyph_is_closed_contours() {
     let view = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 4 * words.len()) };
     let store = Store::new(view).unwrap();
     for g in 0..store.glyph_count() {
-        assert_eq!(open_ends(store.lines(g)), 0, "store glyph {g}");
+        assert_eq!(open_contours(store.points(g)), 0, "store glyph {g}");
     }
 }

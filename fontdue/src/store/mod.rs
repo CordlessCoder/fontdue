@@ -426,7 +426,7 @@ impl<'a> Store<'a> {
         let store = Self::parse(data)?;
         let mode = Checked(core::cell::Cell::new(false));
         for g in 0..store.glyph_count {
-            for _ in store.lines_in(&mode, g) {}
+            for _ in store.points_in(&mode, g) {}
             if mode.failed() {
                 return Err(Error::Corrupt);
             }
@@ -616,15 +616,15 @@ impl<'a> Store<'a> {
         f32::from_bits(self.record(glyph)[3])
     }
 
-    /// The glyph's segments, in contour order, including those with no vertical extent. A glyph
-    /// index past the end yields nothing.
+    /// The glyph's outline: each contour's first point, then the rest of its points in order. A
+    /// glyph index past the end yields nothing.
     #[inline]
-    pub fn lines(&self, glyph: u16) -> Lines<'_, 'a, Trusted> {
-        self.lines_in(Trusted, glyph)
+    pub fn points(&self, glyph: u16) -> Points<'_, 'a, Trusted> {
+        self.points_in(Trusted, glyph)
     }
 
     #[inline(always)]
-    fn lines_in<M: Mode>(&self, mode: M, glyph: u16) -> Lines<'_, 'a, M> {
+    fn points_in<M: Mode>(&self, mode: M, glyph: u16) -> Points<'_, 'a, M> {
         let (placements, record) = match self.glyphs.get(GLYPH_WORDS * glyph as usize) {
             Some(&w) if glyph < self.glyph_count => (w >> GLYPH_SHIFT, w & ((1 << GLYPH_SHIFT) - 1)),
             _ => (0, 0),
@@ -635,7 +635,7 @@ impl<'a> Store<'a> {
         } else {
             self.record(glyph)[2]
         };
-        Lines {
+        Points {
             store: self,
             mode,
             width: size & 0xffff,
@@ -646,8 +646,6 @@ impl<'a> Store<'a> {
             steps: 0,
             x: 0,
             y: 0,
-            fx: 0.0,
-            fy: 0.0,
         }
     }
 }
@@ -655,8 +653,8 @@ impl<'a> Store<'a> {
 // SAFETY: a `Store` built by `new` has decoded every glyph under `Checked`, which requires every
 // point to lie inside the glyph's size in grid units, which is what `grid_bounds` returns. The
 // trusted decode yields exactly those points. `new_unchecked` and `from_parts` move that
-// obligation to their callers. Points are whole grid units below 2^16, so every delta is zero or
-// a normal float.
+// obligation to their callers. Points are whole grid units, so every coordinate is zero or at
+// least 1.
 unsafe impl crate::OutlineSource for Store<'_> {
     #[inline]
     fn info(&self, glyph: u16) -> crate::OutlineInfo {
@@ -670,34 +668,37 @@ unsafe impl crate::OutlineSource for Store<'_> {
 
     #[inline]
     fn draw(&self, glyph: u16, sink: &mut crate::raster::Sink<'_, '_>) {
-        for segment in self.lines(glyph) {
-            sink.segment(segment);
+        for event in self.points(glyph) {
+            match event {
+                crate::PathEvent::MoveTo(p) => sink.move_to(p),
+                crate::PathEvent::LineTo(p) => sink.line_to(p),
+            }
         }
     }
 
-    fn visit(&self, glyph: u16, f: &mut dyn FnMut([f32; 4])) {
-        for segment in self.lines(glyph) {
-            f(segment);
+    fn visit(&self, glyph: u16, f: &mut dyn FnMut(crate::PathEvent)) {
+        for event in self.points(glyph) {
+            f(event);
         }
     }
 }
 
-// SAFETY: `segments` yields exactly what `draw` passes to the sink.
-unsafe impl crate::SegmentSource for Store<'_> {
-    type Segments<'s>
-        = Lines<'s, 's, Trusted>
+// SAFETY: `points` yields exactly what `draw` passes to the sink.
+unsafe impl crate::PathSource for Store<'_> {
+    type Points<'s>
+        = Points<'s, 's, Trusted>
     where
         Self: 's;
 
     #[inline]
-    fn segments(&self, glyph: u16) -> Self::Segments<'_> {
-        self.lines(glyph)
+    fn points(&self, glyph: u16) -> Self::Points<'_> {
+        Store::points(self, glyph)
     }
 }
 
-/// Streaming iterator over one glyph's segments. Its state is two bit positions and the current
-/// point, kept both as grid integers and as the floats the last segment ended on.
-pub struct Lines<'s, 'a, M> {
+/// Streaming iterator over one glyph's outline. Its state is two bit positions and the current
+/// point in grid units.
+pub struct Points<'s, 'a, M> {
     store: &'s Store<'a>,
     mode: M,
     /// The glyph's size in grid units, which the checked walk holds every point to.
@@ -709,61 +710,50 @@ pub struct Lines<'s, 'a, M> {
     steps: u32,
     x: i32,
     y: i32,
-    fx: f32,
-    fy: f32,
 }
 
-impl<M: Mode> Iterator for Lines<'_, '_, M> {
-    type Item = [f32; 4];
+impl<M: Mode> Iterator for Points<'_, '_, M> {
+    type Item = crate::PathEvent;
 
     #[inline(always)]
-    fn next(&mut self) -> Option<[f32; 4]> {
+    fn next(&mut self) -> Option<crate::PathEvent> {
         let s = self.store;
         let words = s.words;
-        let steps_t = &s.steps;
-        let (mut steps, mut shape, mut x, mut y) = (self.steps, self.shape, self.x, self.y);
-        loop {
-            if steps > 0 {
-                steps -= 1;
-                let (dx, dy, p) = step(&self.mode, words, shape, steps_t);
-                shape = p;
-                x = x.wrapping_add(dx);
-                y = y.wrapping_add(dy);
-                if !M::TRUSTED {
-                    self.mode.require(x as u32 <= self.width && y as u32 <= self.height);
-                }
-                let (fx, fy) = (x as f32, y as f32);
-                let seg = [self.fx, self.fy, fx, fy];
-                (self.fx, self.fy) = (fx, fy);
-                (self.steps, self.shape, self.x, self.y) = (steps, shape, x, y);
-                return Some(seg);
-            }
-            if self.placements == 0 || self.mode.failed() {
-                (self.steps, self.shape, self.x, self.y) = (steps, shape, x, y);
-                return None;
-            }
-            self.placements -= 1;
-            let w = peek(&self.mode, words, self.record);
-            let wy = peek(&self.mode, words, self.record.wrapping_add(s.id_bits + s.xy_bits));
-            // SAFETY: `parse` checked `1 <= id_bits <= 16` and `1 <= xy_bits <= 16`, so every
-            // shift is below 32.
-            let (id, px, py) = unsafe {
-                (
-                    w.unchecked_shr(32 - s.id_bits) as usize,
-                    w.unchecked_shl(s.id_bits).unchecked_shr(32 - s.xy_bits),
-                    wy.unchecked_shr(32 - s.xy_bits),
-                )
-            };
-            self.mode.require(id < s.pool_count as usize);
-            self.record = self.record.wrapping_add(s.id_bits + 2 * s.xy_bits);
-            (x, y) = (px as i32, py as i32);
+        if self.steps > 0 {
+            self.steps -= 1;
+            let (dx, dy, p) = step(&self.mode, words, self.shape, &s.steps);
+            self.shape = p;
+            self.x = self.x.wrapping_add(dx);
+            self.y = self.y.wrapping_add(dy);
             if !M::TRUSTED {
-                self.mode.require(px <= self.width && py <= self.height);
+                self.mode.require(self.x as u32 <= self.width && self.y as u32 <= self.height);
             }
-            (self.fx, self.fy) = (x as f32, y as f32);
-            let pool = self.mode.word(s.pool_offsets, id);
-            shape = pool & ((1 << POOL_SHIFT) - 1);
-            steps = pool >> POOL_SHIFT;
+            return Some(crate::PathEvent::LineTo([self.x as f32, self.y as f32]));
         }
+        if self.placements == 0 || self.mode.failed() {
+            return None;
+        }
+        self.placements -= 1;
+        let w = peek(&self.mode, words, self.record);
+        let wy = peek(&self.mode, words, self.record.wrapping_add(s.id_bits + s.xy_bits));
+        // SAFETY: `parse` checked `1 <= id_bits <= 16` and `1 <= xy_bits <= 16`, so every shift is
+        // below 32.
+        let (id, px, py) = unsafe {
+            (
+                w.unchecked_shr(32 - s.id_bits) as usize,
+                w.unchecked_shl(s.id_bits).unchecked_shr(32 - s.xy_bits),
+                wy.unchecked_shr(32 - s.xy_bits),
+            )
+        };
+        self.mode.require(id < s.pool_count as usize);
+        self.record = self.record.wrapping_add(s.id_bits + 2 * s.xy_bits);
+        (self.x, self.y) = (px as i32, py as i32);
+        if !M::TRUSTED {
+            self.mode.require(px <= self.width && py <= self.height);
+        }
+        let pool = self.mode.word(s.pool_offsets, id);
+        self.shape = pool & ((1 << POOL_SHIFT) - 1);
+        self.steps = pool >> POOL_SHIFT;
+        Some(crate::PathEvent::MoveTo([self.x as f32, self.y as f32]))
     }
 }

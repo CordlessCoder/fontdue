@@ -233,8 +233,9 @@ impl Point {
     }
 }
 
+/// A segment as the line walk takes it: its coordinates and reciprocal deltas.
 #[derive(Copy, Clone)]
-pub struct Line {
+pub(crate) struct Line {
     /// X0, Y0, X1, Y1.
     pub(crate) coords: f32x4,
     /// Reciprocal X and Y deltas. The line walk's crossing order depends on them, so a line
@@ -248,7 +249,8 @@ const _: () = assert!(core::mem::size_of::<Line>() == 32);
 const _: () = assert!(core::mem::size_of::<Line>() == 24);
 
 impl Line {
-    pub fn new(start: Point, end: Point) -> Line {
+    #[cfg(test)]
+    pub(crate) fn new(start: Point, end: Point) -> Line {
         let dx = end.x - start.x;
         let dy = end.y - start.y;
         Line {
@@ -266,26 +268,6 @@ impl Line {
                 },
             ],
         }
-    }
-
-    /// A line from the parts `coords` and `params` return, for code the macro emits.
-    ///
-    /// # Safety
-    ///
-    /// `params` must be what `Line::new` computes for `coords`.
-    pub const unsafe fn from_parts(coords: f32x4, params: [f32; 2]) -> Line {
-        Line {
-            coords,
-            params,
-        }
-    }
-
-    pub fn coords(&self) -> f32x4 {
-        self.coords
-    }
-
-    pub fn params(&self) -> [f32; 2] {
-        self.params
     }
 
     /// As `new`, with the reciprocals from `platform::recip`, for lines built at draw time. On
@@ -337,32 +319,15 @@ impl Line {
             f32x4::new(tdx, tdy, x1 - x0, y1 - y0),
         )
     }
-
-    fn reposition(&mut self, bounds: AABB, reverse: bool) {
-        let (mut x0, mut y0, mut x1, mut y1) = if !reverse {
-            self.coords.copied()
-        } else {
-            let (x0, y0, x1, y1) = self.coords.copied();
-            (x1, y1, x0, y0)
-        };
-
-        x0 -= bounds.xmin;
-        y0 -= bounds.ymax;
-        y0 = abs(y0);
-
-        x1 -= bounds.xmin;
-        y1 -= bounds.ymax;
-        y1 = abs(y1);
-
-        *self = Self::new(Point::new(x0, y0), Point::new(x1, y1));
-    }
 }
 
 #[derive(Clone)]
 pub struct Geometry {
-    v_lines: Vec<Line>,
-    m_lines: Vec<Line>,
-    h_lines: Vec<Line>,
+    points: Vec<[f32; 2]>,
+    /// End index in `points` of each finished contour.
+    contours: Vec<u32>,
+    /// Where the open contour starts in `points`.
+    contour_start: usize,
     effective_bounds: AABB,
     start_point: Point,
     previous_point: Point,
@@ -391,6 +356,7 @@ impl Segment {
 
 impl ttf_parser::OutlineBuilder for Geometry {
     fn move_to(&mut self, x0: f32, y0: f32) {
+        self.end_contour();
         let next_point = Point::new(x0, y0);
         self.start_point = next_point;
         self.previous_point = next_point;
@@ -413,9 +379,10 @@ impl ttf_parser::OutlineBuilder for Geometry {
             let b = curve.point(bt);
             // This is twice the triangle area
             let area = (b.x - seg.a.x) * (seg.c.y - seg.a.y) - (seg.c.x - seg.a.x) * (b.y - seg.a.y);
+            // The second half first, so the first is drawn first and points come in contour order.
             if platform::abs(area) > self.max_area {
-                stack.push(Segment::new(seg.a, seg.at, b, bt));
                 stack.push(Segment::new(b, bt, seg.c, seg.ct));
+                stack.push(Segment::new(seg.a, seg.at, b, bt));
             } else {
                 self.push(seg.a, seg.c);
             }
@@ -436,9 +403,10 @@ impl ttf_parser::OutlineBuilder for Geometry {
             let b = curve.point(bt);
             // This is twice the triangle area
             let area = (b.x - seg.a.x) * (seg.c.y - seg.a.y) - (seg.c.x - seg.a.x) * (b.y - seg.a.y);
+            // The second half first, so the first is drawn first and points come in contour order.
             if platform::abs(area) > self.max_area {
-                stack.push(Segment::new(seg.a, seg.at, b, bt));
                 stack.push(Segment::new(b, bt, seg.c, seg.ct));
+                stack.push(Segment::new(seg.a, seg.at, b, bt));
             } else {
                 self.push(seg.a, seg.c);
             }
@@ -451,6 +419,18 @@ impl ttf_parser::OutlineBuilder for Geometry {
             self.push(self.previous_point, self.start_point);
         }
         self.previous_point = self.start_point;
+        self.end_contour();
+    }
+}
+
+/// A non-negative coordinate, or 0 below [`crate::outline::SMALLEST_COORDINATE`], as sources
+/// promise.
+fn flush(v: f32) -> f32 {
+    const SMALLEST: f32 = crate::outline::SMALLEST_COORDINATE;
+    if v < SMALLEST {
+        0.0
+    } else {
+        v
     }
 }
 
@@ -461,9 +441,9 @@ impl Geometry {
         let max_area = ERROR_THRESHOLD * 2.0 * (units_per_em / scale);
 
         Geometry {
-            v_lines: Vec::new(),
-            m_lines: Vec::new(),
-            h_lines: Vec::new(),
+            points: Vec::new(),
+            contours: Vec::new(),
+            contour_start: 0,
             effective_bounds: AABB {
                 xmin: f32::MAX,
                 xmax: f32::MIN,
@@ -480,52 +460,69 @@ impl Geometry {
 
     fn push(&mut self, start: Point, end: Point) {
         // We're using to_bits here because we only care if they're _exactly_ the same.
-        if start.y.to_bits() != end.y.to_bits() {
+        let (x_same, y_same) = (start.x.to_bits() == end.x.to_bits(), start.y.to_bits() == end.y.to_bits());
+        if x_same && y_same {
+            return;
+        }
+        let last = self.points.get(self.contour_start..).and_then(|c| c.last()).copied();
+        if last != Some([start.x, start.y]) {
+            // A segment that does not continue the contour: flattening emits them in order, so
+            // only a source's own gap does this. The gap starts a new contour.
+            self.end_contour();
+            self.points.push([start.x, start.y]);
+        }
+        self.points.push([end.x, end.y]);
+        // Horizontal segments add no area and stay out of the bounds, so the upright glyph is what
+        // it was when they were dropped; `finalize` clamps them into the bounds.
+        if !y_same {
             self.area += (end.y - start.y) * (end.x + start.x);
-            if start.x.to_bits() == end.x.to_bits() {
-                self.v_lines.push(Line::new(start, end));
-            } else {
-                self.m_lines.push(Line::new(start, end));
-            }
             Self::recalculate_bounds(&mut self.effective_bounds, start.x, start.y);
             Self::recalculate_bounds(&mut self.effective_bounds, end.x, end.y);
-        } else if start.x.to_bits() != end.x.to_bits() {
-            // No area and no effect on the bounds upright; a transformed draw needs it to close
-            // the contour.
-            self.h_lines.push(Line::new(start, end));
         }
     }
 
-    pub(crate) fn finalize(mut self, glyph: &mut Glyph) {
-        if self.v_lines.is_empty() && self.m_lines.is_empty() {
-            self.effective_bounds = AABB::default();
-            self.h_lines.clear();
+    /// Finishes the open contour, dropping it if it has no segment.
+    fn end_contour(&mut self) {
+        if self.points.len() - self.contour_start < 2 {
+            self.points.truncate(self.contour_start);
         } else {
-            // Horizontal lines are left out of the bounds, so the upright glyph is unchanged, and
-            // clamped into them instead. A run of horizontal lines lies on one row and only its
-            // ends, which it shares with the contour's other lines, decide its area under any
-            // transform. Clamping moves every point along the row and none of those ends, and
-            // moves shared points alike, so each contour stays closed with the same area.
-            let b = self.effective_bounds;
-            self.h_lines.retain_mut(|l| {
-                let (x0, y0, x1, y1) = l.coords.copied();
-                let clamp = |x: f32, y: f32| Point::new(x.max(b.xmin).min(b.xmax), y.max(b.ymin).min(b.ymax));
-                let (start, end) = (clamp(x0, y0), clamp(x1, y1));
-                *l = Line::new(start, end);
-                start.x.to_bits() != end.x.to_bits()
-            });
-            self.reverse_points = self.area > 0.0;
-            for line in self.v_lines.iter_mut().chain(self.m_lines.iter_mut()).chain(self.h_lines.iter_mut())
-            {
-                line.reposition(self.effective_bounds, self.reverse_points);
-            }
-            self.v_lines.shrink_to_fit();
-            self.m_lines.shrink_to_fit();
-            self.h_lines.shrink_to_fit();
+            self.contours.push(self.points.len() as u32);
         }
-        glyph.v_lines = self.v_lines;
-        glyph.m_lines = self.m_lines;
-        glyph.h_lines = self.h_lines;
+        self.contour_start = self.points.len();
+    }
+
+    pub(crate) fn finalize(mut self, glyph: &mut Glyph) {
+        self.end_contour();
+        let b = self.effective_bounds;
+        if b.xmin > b.xmax {
+            // No segment with vertical extent: nothing covers anything.
+            self.effective_bounds = AABB::default();
+            self.points.clear();
+            self.contours.clear();
+        } else {
+            // Points only horizontal segments reach can lie outside the bounds, and are clamped
+            // into them. A run of horizontal segments lies on one row and only its two ends, which
+            // it shares with the contour's other segments, decide its area under any transform.
+            // Clamping moves points along the row and none of those ends, so each contour stays
+            // closed with the same area. Every other point is inside already and does not move.
+            self.reverse_points = self.area > 0.0;
+            let mut start = 0;
+            for &end in &self.contours {
+                let contour = &mut self.points[start..end as usize];
+                if self.reverse_points {
+                    contour.reverse();
+                }
+                for p in contour {
+                    let (x, y) = (p[0].max(b.xmin).min(b.xmax), p[1].max(b.ymin).min(b.ymax));
+                    *p = [flush(x - b.xmin), flush(abs(y - b.ymax))];
+                }
+                start = end as usize;
+            }
+            self.points.shrink_to_fit();
+            self.contours.shrink_to_fit();
+        }
+        glyph.points = self.points;
+        glyph.contours = self.contours;
         glyph.bounds = OutlineBounds {
             xmin: self.effective_bounds.xmin,
             ymin: self.effective_bounds.ymin,
@@ -560,18 +557,14 @@ mod tests {
         let empty = Geometry::new(32.0, 1000.0);
         let mut empty_glyph = Glyph::default();
         empty.finalize(&mut empty_glyph);
-        assert!(empty_glyph.v_lines.is_empty());
-        assert!(empty_glyph.m_lines.is_empty());
-        assert!(empty_glyph.h_lines.is_empty());
+        assert!(empty_glyph.points.is_empty() && empty_glyph.contours.is_empty());
 
         let mut point = Geometry::new(32.0, 1000.0);
         point.move_to(10.0, 20.0);
         point.close();
         let mut point_glyph = Glyph::default();
         point.finalize(&mut point_glyph);
-        assert!(point_glyph.v_lines.is_empty());
-        assert!(point_glyph.m_lines.is_empty());
-        assert!(point_glyph.h_lines.is_empty());
+        assert!(point_glyph.points.is_empty() && point_glyph.contours.is_empty());
     }
 
     #[test]

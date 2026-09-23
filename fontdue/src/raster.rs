@@ -5,6 +5,17 @@
  */
 
 use crate::math::{Line, Point};
+
+/// Whether a scale keeps every coordinate the sources may have, zero or at least 2^-60, at zero or
+/// at least 2^-80.
+fn safe_scale(scale: f32) -> bool {
+    scale >= f32::from_bits((127 - 20) << 23)
+}
+
+/// Whether an offset is zero or at least 2^-100, so a placed coordinate is too.
+fn safe_offset(offset: f32) -> bool {
+    offset == 0.0 || offset >= f32::from_bits((127 - 100) << 23)
+}
 use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, mul_add};
 use alloc::vec::*;
 use core::iter::FusedIterator;
@@ -124,7 +135,7 @@ fn index_of(value: f32) -> i32 {
     unsafe { as_i32_unchecked(value) }
 }
 
-/// Where an [`OutlineSource`](crate::OutlineSource) sends a glyph's segments. Only the raster
+/// Where an [`OutlineSource`](crate::OutlineSource) sends a glyph's contours. Only the raster
 /// makes one, sized and scaled for the glyph being drawn.
 pub struct Sink<'s, 'b> {
     /// The raster's cells, taken out of it once so nothing in the line walk can alias them. The
@@ -137,10 +148,13 @@ pub struct Sink<'s, 'b> {
     /// `draw`, duplicated lanes are separate loads and separate live registers.
     scale_x: f32,
     scale_y: f32,
-    inv_x: f32,
-    inv_y: f32,
     offset_x: f32,
     offset_y: f32,
+    /// Where the next `line_to` starts, placed.
+    last: Point,
+    /// Whether segments need `placed`'s guards: set when the scale or an offset is too small for
+    /// the sources' coordinate rule to keep placed deltas normal.
+    guard: bool,
     _raster: PhantomData<&'s mut Raster<'b>>,
 }
 
@@ -167,43 +181,123 @@ impl<'s, 'b> Sink<'s, 'b> {
             len,
             scale_x,
             scale_y,
-            inv_x: 1.0 / scale_x,
-            inv_y: 1.0 / scale_y,
             offset_x,
             offset_y,
+            last: Point::new(offset_x, offset_y),
+            guard: !(safe_scale(scale_x)
+                && safe_scale(scale_y)
+                && safe_offset(offset_x)
+                && safe_offset(offset_y)),
             _raster: PhantomData,
         }
     }
 
-    /// Draws one segment, `[x0, y0, x1, y1]` in the source's point units, or skips it when it
-    /// has no vertical extent. The segment must meet [`OutlineSource`](crate::OutlineSource)'s
-    /// contract, which the source promised by implementing it: that is what makes its
-    /// reciprocals, and so the line walk, stay in bounds.
+    /// Starts a contour at `point`, in the source's point units.
     #[inline(always)]
-    pub fn segment(&mut self, [x0, y0, x1, y1]: [f32; 4]) {
-        if y0 == y1 {
+    pub fn move_to(&mut self, point: [f32; 2]) {
+        self.last = self.place(point);
+    }
+
+    /// Draws the segment from the previous point to `point`, or skips it when it has no vertical
+    /// extent. The points must meet [`OutlineSource`](crate::OutlineSource)'s contract, which the
+    /// source promised by implementing it: that is what makes the reciprocals, and so the line
+    /// walk, stay in bounds.
+    #[inline(always)]
+    pub fn line_to(&mut self, point: [f32; 2]) {
+        let placed = self.place(point);
+        if self.guard {
+            self.placed(self.last, placed);
+        } else {
+            self.edge(self.last, placed);
+        }
+        self.last = placed;
+    }
+
+    /// Draws stored contours, holding the previous point in registers rather than in the sink.
+    #[inline(always)]
+    pub(crate) fn contours(&mut self, points: &[[f32; 2]], contours: &[u32]) {
+        // Decided once, not per segment: with both edges in one loop body the crossing loop ran a
+        // register short.
+        if self.guard {
+            self.contours_with::<true>(points, contours)
+        } else {
+            self.contours_with::<false>(points, contours)
+        }
+    }
+
+    #[inline(always)]
+    fn contours_with<const GUARD: bool>(&mut self, points: &[[f32; 2]], contours: &[u32]) {
+        crate::outline::each_contour(points, contours, |&first, rest| {
+            let mut last = self.place(first);
+            for &point in rest {
+                let placed = self.place(point);
+                self.edge_with::<GUARD>(last, placed);
+                last = placed;
+            }
+        });
+    }
+
+    /// Draws a source's path events, as `contours` does stored points.
+    #[inline(always)]
+    pub(crate) fn path(&mut self, events: impl Iterator<Item = crate::PathEvent>) {
+        if self.guard {
+            self.path_with::<true>(events)
+        } else {
+            self.path_with::<false>(events)
+        }
+    }
+
+    #[inline(always)]
+    fn path_with<const GUARD: bool>(&mut self, events: impl Iterator<Item = crate::PathEvent>) {
+        let mut last = self.last;
+        for event in events {
+            match event {
+                crate::PathEvent::MoveTo(p) => last = self.place(p),
+                crate::PathEvent::LineTo(p) => {
+                    let placed = self.place(p);
+                    self.edge_with::<GUARD>(last, placed);
+                    last = placed;
+                }
+            }
+        }
+        self.last = last;
+    }
+
+    #[inline(always)]
+    fn edge_with<const GUARD: bool>(&mut self, start: Point, end: Point) {
+        if GUARD {
+            self.placed(start, end);
+        } else {
+            self.edge(start, end);
+        }
+    }
+
+    /// A point in raster space.
+    #[inline(always)]
+    fn place(&self, [x, y]: [f32; 2]) -> Point {
+        Point::new(x * self.scale_x + self.offset_x, y * self.scale_y + self.offset_y)
+    }
+
+    /// A placed segment from a source, skipping it when it has no vertical extent. Only for a
+    /// sink without `guard`: then the sources' coordinate rule and the scale keep both deltas zero
+    /// or normal.
+    #[inline(always)]
+    fn edge(&mut self, start: Point, end: Point) {
+        if start.y == end.y {
             return;
         }
-        let line = Line::at_draw(Point::new(x0, y0), Point::new(x1, y1));
-        if x0 == x1 {
-            self.v(&line);
+        let line = Line::at_draw(start, end);
+        let (nudge, adjustment, params) = line.raster_parts();
+        if start.x == end.x {
+            self.v_line(line.coords, nudge, adjustment);
         } else {
-            self.m(&line);
+            self.m_line(line.coords, nudge, adjustment, params);
         }
     }
 
-    #[inline(always)]
-    pub(crate) fn lines(&mut self, v_lines: &[Line], m_lines: &[Line]) {
-        for line in v_lines {
-            self.v(line);
-        }
-        for line in m_lines {
-            self.m(line);
-        }
-    }
-
-    /// Draws a segment whose points are already in raster space and inside it, as the
-    /// transformed draw passes them, skipping it when it has no vertical extent.
+    /// Draws a segment whose points are in raster space and inside it, skipping it when it has
+    /// no vertical extent. Deltas too small to be normal count as zero, since the reciprocal is
+    /// only accurate for normal values; a tiny scale can make them so from normal source deltas.
     #[inline(always)]
     pub(crate) fn placed(&mut self, start: Point, end: Point) {
         let Some(line) = crate::transform::placed_line(start, end) else {
@@ -216,26 +310,6 @@ impl<'s, 'b> Sink<'s, 'b> {
         } else {
             self.m_line(line.coords, nudge, adjustment, params);
         }
-    }
-
-    /// The line's coordinates in raster space.
-    #[inline(always)]
-    fn place(&self, line: &Line) -> f32x4 {
-        let (sx, sy, ox, oy) = (self.scale_x, self.scale_y, self.offset_x, self.offset_y);
-        line.coords * f32x4::new(sx, sy, sx, sy) + f32x4::new(ox, oy, ox, oy)
-    }
-
-    #[inline(always)]
-    fn v(&mut self, line: &Line) {
-        let (nudge, adjustment, _) = line.raster_parts();
-        self.v_line(self.place(line), nudge, adjustment);
-    }
-
-    #[inline(always)]
-    fn m(&mut self, line: &Line) {
-        let (nudge, adjustment, line_params) = line.raster_parts();
-        let params = f32x4::new(self.inv_x, self.inv_y, self.scale_x, self.scale_y);
-        self.m_line(self.place(line), nudge, adjustment, line_params * params);
     }
 
     #[inline(always)]

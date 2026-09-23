@@ -1,7 +1,7 @@
 use crate::FontResult;
 pub use crate::fontrepr::FontRepr;
-use crate::math::{Geometry, Line};
-use crate::outline::{GlyphRef, OutlineInfo, SegmentSource};
+use crate::math::Geometry;
+use crate::outline::{GlyphRef, OutlineInfo, PathSource};
 use crate::platform::{as_i32, as_i32_unchecked, ceil, floor, fract, is_negative};
 use crate::raster::{Raster, Sink};
 use crate::table::{TableKern, load_gsub};
@@ -140,26 +140,23 @@ impl LineMetrics {
 #[derive(Clone)]
 #[doc(hidden)]
 pub struct Glyph {
-    pub(crate) v_lines: Vec<Line>,
-    pub(crate) m_lines: Vec<Line>,
-    /// Lines with no vertical extent, which only a transformed draw uses.
-    pub(crate) h_lines: Vec<Line>,
+    /// Points in bounds-local units, y down, in contour order. Each contour ends on its first
+    /// point.
+    pub(crate) points: Vec<[f32; 2]>,
+    /// End index in `points` of each contour.
+    pub(crate) contours: Vec<u32>,
     pub(crate) advance_width: f32,
     pub(crate) advance_height: f32,
     pub(crate) bounds: OutlineBounds,
 }
 
 impl Glyph {
-    pub fn v_lines(&self) -> &[Line] {
-        &self.v_lines
+    pub fn points(&self) -> &[[f32; 2]] {
+        &self.points
     }
 
-    pub fn m_lines(&self) -> &[Line] {
-        &self.m_lines
-    }
-
-    pub fn h_lines(&self) -> &[Line] {
-        &self.h_lines
+    pub fn contours(&self) -> &[u32] {
+        &self.contours
     }
 
     pub fn bounds(&self) -> OutlineBounds {
@@ -178,9 +175,8 @@ impl Glyph {
 impl Default for Glyph {
     fn default() -> Self {
         Glyph {
-            v_lines: Vec::new(),
-            m_lines: Vec::new(),
-            h_lines: Vec::new(),
+            points: Vec::new(),
+            contours: Vec::new(),
             advance_width: 0.0,
             advance_height: 0.0,
             bounds: OutlineBounds::default(),
@@ -350,7 +346,7 @@ pub fn rasterize_inner(canvas: &mut Raster<'_>, glyph: &GlyphRef<'_>, scale: f32
 /// Rasterizes one glyph of `source`, monomorphized over the source. [`GlyphRef::from_source`] is
 /// the dynamically dispatched form that `FontRepr` returns.
 #[inline(always)]
-pub fn rasterize_source<S: SegmentSource + ?Sized>(
+pub fn rasterize_source<S: PathSource + ?Sized>(
     canvas: &mut Raster<'_>,
     source: &S,
     glyph: u16,
@@ -360,19 +356,15 @@ pub fn rasterize_source<S: SegmentSource + ?Sized>(
     // Taken before the glyph is measured and the raster sized, not inside the draw. Built after
     // those steps, the iterator's state cost the line walk two registers on Xtensa, reloaded on
     // every cell crossing.
-    let segments = source.segments(glyph);
-    rasterize_with(canvas, &source.info(glyph), scale, stretch, |sink| {
-        for segment in segments {
-            sink.segment(segment);
-        }
-    })
+    let points = source.points(glyph);
+    rasterize_with(canvas, &source.info(glyph), scale, stretch, |sink| sink.path(points))
 }
 
 /// `FontRepr::rasterize_indexed` over a source, generically, for fonts the macro backs with a
 /// store. `scale` is the font's `scale_factor(px)`.
 #[doc(hidden)]
 #[inline]
-pub fn rasterize_source_indexed<'r, S: SegmentSource + ?Sized>(
+pub fn rasterize_source_indexed<'r, S: PathSource + ?Sized>(
     canvas: &'r mut Raster<'_>,
     source: &S,
     glyph: u16,

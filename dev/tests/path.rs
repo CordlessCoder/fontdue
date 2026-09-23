@@ -1,6 +1,6 @@
 use fontdue::raster::{Lines, Raster};
 use fontdue::PathEvent::{self, LineTo, MoveTo};
-use fontdue::{flatten, rasterize_path, PathCommand, Transform, TransformedMetrics};
+use fontdue::{flatten, rasterize_path, rasterize_path_clipped, PathCommand, Transform, TransformedMetrics};
 
 fn polygon(points: &[[f32; 2]]) -> Vec<PathEvent> {
     let mut events = vec![MoveTo(points[0])];
@@ -234,4 +234,82 @@ fn fills_a_flattened_circle() {
     let area: f32 = canvas.get_bitmap_iter().map(|c| c as f32 / 255.0).sum();
     let want = std::f32::consts::PI * r * r;
     assert!((area - want).abs() < 0.005 * want, "{area} against {want}");
+}
+
+/// A clipped fill is the window of the unclipped one it covers, within a unit of coverage, for
+/// windows cutting every side of a rotated, curved path.
+#[test]
+fn clipped_fill_is_a_window_of_the_full_fill() {
+    let mut path: Vec<PathEvent> = flatten(circle(15.0), 0.05).collect();
+    path.extend(polygon(&[[-10.0, 5.0], [40.0, -8.0], [35.0, 20.0]]));
+    let turn = Transform::rotation(0.8660254, 0.5);
+    let pen = (50.25, 40.5);
+    let (m, full) = fill(&path, turn, pen);
+    let full_at = |x: i32, y: i32| {
+        let (i, j) = (x - m.x, y - m.y);
+        let inside = (0..m.width as i32).contains(&i) && (0..m.height as i32).contains(&j);
+        if inside {
+            full[j as usize * m.width + i as usize]
+        } else {
+            0
+        }
+    };
+    let mut canvas = Raster::empty();
+    for (x0, y0, w, h) in [
+        (m.x - 3, m.y - 3, m.width + 6, m.height + 6),
+        (m.x + 5, m.y + 7, 9, 11),
+        (m.x + 20, m.y - 4, 30, 12),
+        (m.x - 5, m.y + 20, 14, 40),
+        (m.x + 10, m.y + 10, 1, 1),
+    ] {
+        canvas.resize(w, h);
+        rasterize_path_clipped(
+            &mut canvas,
+            path.iter().copied(),
+            turn,
+            (pen.0 - x0 as f32, pen.1 - y0 as f32),
+        );
+        for (k, c) in canvas.get_bitmap_iter().enumerate() {
+            let (x, y) = (x0 + (k % w) as i32, y0 + (k / w) as i32);
+            assert!(
+                c.abs_diff(full_at(x, y)) <= 1,
+                "window {x0}, {y0}, {w}x{h}: pixel {x}, {y} is {c}, not {}",
+                full_at(x, y)
+            );
+        }
+    }
+}
+
+/// A path around the whole raster covers all of it, and fills add to what the raster holds.
+#[test]
+fn clipped_fills_cover_and_accumulate() {
+    let mut canvas = Raster::new(8, 6);
+    let big = polygon(&[[-100.0, -50.0], [300.0, -40.0], [250.0, 200.0], [-80.0, 150.0]]);
+    rasterize_path_clipped(&mut canvas, big.iter().copied(), Transform::IDENTITY, (0.0, 0.0));
+    assert!(canvas.get_bitmap_iter().all(|c| c == 255));
+
+    canvas.resize(8, 6);
+    let left = polygon(&[[0.0, 0.0], [4.0, 0.0], [4.0, 6.0], [0.0, 6.0]]);
+    rasterize_path_clipped(&mut canvas, left.iter().copied(), Transform::IDENTITY, (0.0, 0.0));
+    rasterize_path_clipped(&mut canvas, left.iter().copied(), Transform::IDENTITY, (4.0, 0.0));
+    assert!(canvas.get_bitmap_iter().all(|c| c == 255));
+}
+
+/// Every write stays inside, which `Sink::add` checks in builds with debug assertions: empty and
+/// one-pixel rasters, points far outside, and non-finite points.
+#[test]
+fn clipped_fills_stay_in_bounds() {
+    let paths = [
+        polygon(&[[-1e30, -1e30], [1e30, 5.0], [3.0, 1e30]]),
+        polygon(&[[f32::NAN, 1.0], [2.0, f32::INFINITY], [f32::NEG_INFINITY, 3.0]]),
+        polygon(&[[0.5, -2.0], [0.5, 9.0], [0.75, 9.0]]),
+        polygon(&[[-3.0, 0.25], [9.0, 0.5], [2.0, 0.75]]),
+    ];
+    for (w, h) in [(0, 0), (1, 0), (0, 1), (1, 1), (3, 2)] {
+        let mut canvas = Raster::new(w, h);
+        for path in &paths {
+            rasterize_path_clipped(&mut canvas, path.iter().copied(), Transform::IDENTITY, (0.0, 0.0));
+        }
+        assert_eq!(canvas.get_bitmap_iter().count(), w * h);
+    }
 }

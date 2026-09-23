@@ -314,6 +314,96 @@ where
     fill(canvas, map, (pen_x, pen_y), Iter(path.clone()), Iter(path))
 }
 
+/// Fills `path` under `transform` into `canvas` at the size it already has, clipped to it, and
+/// adds to what the raster holds. `pen` is in pixels from the raster's top-left corner. Clear the
+/// raster with [`Raster::resize`] between frames; left uncleared, layered paths add their
+/// coverage, which is their union under the nonzero rule where they wind the same way.
+///
+/// The path's points are placed and its contours closed as for [`rasterize_path`]. Any path is
+/// safe to draw; non-finite points give unreliable coverage and nothing else.
+pub fn rasterize_path_clipped<I: IntoIterator<Item = PathEvent>>(
+    canvas: &mut Raster<'_>,
+    path: I,
+    transform: Transform,
+    pen: (f32, f32),
+) {
+    let (w, h) = (at_most(canvas.width()), at_most(canvas.height()));
+    let [a, b, c, d] = transform.m;
+    let map = Affine {
+        ax: a,
+        bx: b,
+        cx: pen.0,
+        ay: c,
+        by: d,
+        cy: pen.1,
+    };
+    let mut lines = Lines::of(canvas);
+    let mut last = (0.0, 0.0);
+    for event in Closed::new(path.into_iter()) {
+        match event {
+            PathEvent::MoveTo([x, y]) => last = map.apply(x, y),
+            PathEvent::LineTo([x, y]) => {
+                let next = map.apply(x, y);
+                clip(&mut lines, last, next, w, h);
+                last = next;
+            }
+        }
+    }
+}
+
+/// The largest float not above `n`.
+fn at_most(n: usize) -> f32 {
+    let f = n as f32;
+    if f as usize > n {
+        f32::from_bits(f.to_bits() - 1)
+    } else {
+        f
+    }
+}
+
+/// Adds the part of the segment from `p` to `q` that lies in rows `[0, h]`, with what lies left or
+/// right of `[0, w]` moved onto that edge. A row's coverage is a running sum from the left, so a
+/// segment left of the raster covers the row as it would at `x = 0`, and one right of it covers
+/// none of it, as at `x = w`.
+fn clip(lines: &mut Lines<'_, '_>, mut p: (f32, f32), mut q: (f32, f32), w: f32, h: f32) {
+    if (p.1 <= 0.0 && q.1 <= 0.0) || (p.1 >= h && q.1 >= h) {
+        return;
+    }
+    let at_row = |p: (f32, f32), q: (f32, f32), y: f32| (p.0 + (y - p.1) / (q.1 - p.1) * (q.0 - p.0), y);
+    let (from, to) = (p, q);
+    for end in [&mut p, &mut q] {
+        if end.1 < 0.0 {
+            *end = at_row(from, to, 0.0);
+        } else if end.1 > h {
+            *end = at_row(from, to, h);
+        }
+    }
+    // The points where the segment crosses x = 0 and x = w, in the order it meets them.
+    let mut points = [p; 4];
+    let mut n = 1;
+    let edges = if p.0 <= q.0 {
+        [0.0, w]
+    } else {
+        [w, 0.0]
+    };
+    for x in edges {
+        if (p.0 < x) != (q.0 < x) {
+            points[n] = (x, p.1 + (x - p.0) / (q.0 - p.0) * (q.1 - p.1));
+            n += 1;
+        }
+    }
+    points[n] = q;
+    let place = |(x, y): (f32, f32)| Point::new(clamp(x, w), clamp(y, h));
+    let mut from = place(points[0]);
+    for &point in &points[1..=n] {
+        let to = place(point);
+        // SAFETY: `clamp` puts both points inside the raster, each coordinate zero or at least
+        // 2^-100, and `at_most` keeps `w` and `h` within its size.
+        unsafe { lines.edge(from, to) };
+        from = to;
+    }
+}
+
 /// A path with every contour closed.
 #[derive(Clone)]
 struct Closed<I> {

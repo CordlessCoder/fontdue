@@ -40,6 +40,7 @@ pub use crate::outline::{
 };
 pub use crate::path::{
     Flatten, MAX_CURVE_SEGMENTS, PathCommand, Transform, TransformedMetrics, flatten, rasterize_path,
+    rasterize_path_clipped,
 };
 pub use crate::transform::{
     PenOffsets, rasterize_source_transformed, rasterize_source_transformed_indexed, rasterize_transformed,

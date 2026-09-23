@@ -75,7 +75,20 @@ impl<'a> Raster<'a> {
         Some(r)
     }
 
-    pub(crate) fn resize(&mut self, w: usize, h: usize) {
+    pub fn width(&self) -> usize {
+        self.w
+    }
+
+    pub fn height(&self) -> usize {
+        self.h
+    }
+
+    /// Resizes to `w` by `h` pixels, all empty.
+    ///
+    /// # Panics
+    ///
+    /// If `w * h + 3` exceeds `i32::MAX`, or the raster borrows a slice too short for it.
+    pub fn resize(&mut self, w: usize, h: usize) {
         // The line walk writes without bounds checks off `w` and `h`, computing cell indices in
         // `i32`. A wrapped length would leave the buffer shorter than the dimensions it trusts,
         // and a wrapped index would write outside it.

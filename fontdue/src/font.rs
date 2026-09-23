@@ -113,7 +113,7 @@ pub struct LineMetrics {
 
 impl LineMetrics {
     /// Creates a new line metrics struct and computes the new line size.
-    fn new(ascent: i16, descent: i16, line_gap: i16) -> LineMetrics {
+    pub(crate) fn new(ascent: i16, descent: i16, line_gap: i16) -> LineMetrics {
         // Operations between this values can exceed i16, so we extend to i32 here.
         let (ascent, descent, line_gap) = (ascent as i32, descent as i32, line_gap as i32);
         LineMetrics {
@@ -260,7 +260,7 @@ impl core::fmt::Debug for Font {
 }
 
 /// Converts a ttf-parser FaceParsingError into a string.
-fn convert_error(error: FaceParsingError) -> &'static str {
+pub(crate) fn convert_error(error: FaceParsingError) -> &'static str {
     use FaceParsingError::*;
     match error {
         MalformedFont => "An attempt to read out of bounds detected.",
@@ -272,7 +272,7 @@ fn convert_error(error: FaceParsingError) -> &'static str {
     }
 }
 
-fn convert_name(face: &Face) -> Option<String> {
+pub(crate) fn convert_name(face: &Face) -> Option<String> {
     for name in face.names() {
         if name.name_id == 4 && name.is_unicode() {
             return Some(unicode::decode_utf16(name.name));
@@ -454,6 +454,22 @@ fn rasterize_with(
     metrics
 }
 
+/// Glyph `index` of `face`, flattened for a px size of `scale`, as `Font` stores it.
+pub(crate) fn outline_glyph(face: &Face, index: u16, scale: f32, units_per_em: f32) -> Glyph {
+    let mut glyph = Glyph::default();
+    let glyph_id = GlyphId(index);
+    if let Some(advance_width) = face.glyph_hor_advance(glyph_id) {
+        glyph.advance_width = advance_width as f32;
+    }
+    if let Some(advance_height) = face.glyph_ver_advance(glyph_id) {
+        glyph.advance_height = advance_height as f32;
+    }
+    let mut geometry = Geometry::new(scale, units_per_em);
+    face.outline_glyph(glyph_id, &mut geometry);
+    geometry.finalize(&mut glyph);
+    glyph
+}
+
 impl Font {
     /// Constructs a font from an array of bytes.
     pub fn from_bytes<Data: Deref<Target = [u8]>>(data: Data, settings: FontSettings) -> FontResult<Font> {
@@ -507,20 +523,7 @@ impl Font {
             if index >= glyph_count {
                 return Err("Attempted to map a codepoint out of bounds.");
             }
-
-            let mut glyph = Glyph::default();
-            let glyph_id = GlyphId(index);
-            if let Some(advance_width) = face.glyph_hor_advance(glyph_id) {
-                glyph.advance_width = advance_width as f32;
-            }
-            if let Some(advance_height) = face.glyph_ver_advance(glyph_id) {
-                glyph.advance_height = advance_height as f32;
-            }
-
-            let mut geometry = Geometry::new(settings.scale, units_per_em);
-            face.outline_glyph(glyph_id, &mut geometry);
-            geometry.finalize(&mut glyph);
-            Ok(glyph)
+            Ok(outline_glyph(&face, index, settings.scale, units_per_em))
         };
 
         #[cfg(not(feature = "parallel"))]

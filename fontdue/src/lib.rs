@@ -17,6 +17,7 @@ mod fontrepr;
 mod hash;
 /// Tools for laying out strings of text.
 pub mod layout;
+mod lazy;
 #[doc(hidden)]
 pub mod math;
 pub mod outline;
@@ -29,6 +30,7 @@ mod transform;
 mod unicode;
 
 pub use crate::font::*;
+pub use crate::lazy::LazyFont;
 pub use crate::outline::{
     GlyphRef, OutlineInfo, OutlineSource, PathEvent, PathGlyph, PathSource, SMALLEST_COORDINATE,
 };

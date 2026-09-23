@@ -10,26 +10,11 @@ fn utf8_acc_cont_byte(ch: u32, byte: u8) -> u32 {
     (ch << 6) | (byte & CONT_MASK) as u32
 }
 
+/// Big-endian UTF-16, as the `name` table stores it. Font data is untrusted: unpaired surrogates
+/// decode to U+FFFD, and a trailing odd byte is dropped.
 pub fn decode_utf16(bytes: &[u8]) -> String {
-    let mut output = String::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        output.push(read_utf16(bytes, &mut offset));
-    }
-    output
-}
-
-pub fn read_utf16(bytes: &[u8], offset: &mut usize) -> char {
-    let a = ((bytes[*offset] as u16) << 8) | bytes[*offset + 1] as u16;
-    *offset += 2;
-    if a < 0xD800 || 0xDFFF < a {
-        unsafe { core::char::from_u32_unchecked(a as u32) }
-    } else {
-        let b = ((bytes[*offset] as u16) << 8) | bytes[*offset + 1] as u16;
-        *offset += 2;
-        let c = (((a - 0xD800) as u32) << 10 | (b - 0xDC00) as u32) + 0x1_0000;
-        unsafe { core::char::from_u32_unchecked(c as u32) }
-    }
+    let units = bytes.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+    core::char::decode_utf16(units).map(|c| c.unwrap_or(core::char::REPLACEMENT_CHARACTER)).collect()
 }
 
 /// Returns (length, character). Cannot be run at the end of the string.
@@ -198,5 +183,23 @@ impl CharacterData {
     /// Marks if the character is missing from its associated font.
     pub fn is_missing(&self) -> bool {
         self.bits & CharacterData::MISSING != 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_utf16;
+    use alloc::string::String;
+
+    /// Font names are untrusted: unpaired surrogates and an odd length must decode, not produce an
+    /// invalid `char` or panic.
+    #[test]
+    fn decode_utf16_survives_malformed_names() {
+        let be = |units: &[u16]| units.iter().flat_map(|u| u.to_be_bytes()).collect::<alloc::vec::Vec<u8>>();
+        assert_eq!(decode_utf16(&be(&[0x0041, 0xD83D, 0xDE00, 0x0042])), "A\u{1F600}B");
+        assert_eq!(decode_utf16(&be(&[0xDC00, 0x0041])), "\u{FFFD}A");
+        assert_eq!(decode_utf16(&be(&[0xD800, 0x0041])), "\u{FFFD}A");
+        assert_eq!(decode_utf16(&be(&[0xDBFF])), "\u{FFFD}");
+        assert_eq!(decode_utf16(&[0x00, 0x41, 0x00]), String::from("A"));
     }
 }

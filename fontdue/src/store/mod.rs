@@ -350,6 +350,7 @@ fn step<M: Mode>(mode: &M, words: &[u32], pos: u32, t: &StepTable<'_>) -> (i32, 
     // SAFETY: `fast` has `STEP_ENTRY_WORDS * FAST_SIZE` entries, checked by `parse`, and the
     // index is the top `FAST_BITS` bits of `w`.
     let e = unsafe { t.fast.as_ptr().add(STEP_ENTRY_WORDS * (w >> (32 - FAST_BITS)) as usize) };
+    // SAFETY: `e` starts one of those entries, each `STEP_ENTRY_WORDS` (3) words long.
     let (ex, ey, c) = unsafe { (*e, *e.add(1), *e.add(2)) };
     if c & STEP_SLOW != 0 {
         return slow_step(mode, words, pos, t);

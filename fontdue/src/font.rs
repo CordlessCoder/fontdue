@@ -13,7 +13,6 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::*;
 use core::hash::{Hash, Hasher};
-use core::mem;
 use core::num::NonZeroU16;
 use core::ops::Deref;
 use ttf_parser::{Face, FaceParsingError, GlyphId, Tag};
@@ -612,8 +611,7 @@ impl FontRepr for Font {
 
     #[inline]
     fn lookup_glyph_index(&self, character: char) -> u16 {
-        // This is safe, Option<NonZeroU16> is documented to have the same layout as u16.
-        unsafe { mem::transmute::<Option<NonZeroU16>, u16>(self.char_to_glyph.get(&character).copied()) }
+        self.char_to_glyph.get(&character).map_or(0, |index| index.get())
     }
 
     #[inline]

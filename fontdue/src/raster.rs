@@ -127,6 +127,7 @@ impl<'a> Raster<'a> {
 /// raster, by `Lines::line`'s contract, so the unchecked convert has its precondition.
 #[inline(always)]
 fn index_of(value: f32) -> i32 {
+    // SAFETY: as above.
     unsafe { as_i32_unchecked(value) }
 }
 
@@ -484,6 +485,8 @@ impl Cells {
         self.check(cell);
         // Both loads, then both sums, so the second sum's latency overlaps the first's rather
         // than following it.
+        // SAFETY: `Lines::line`'s contract puts `cell` inside the raster and `cell + 1` inside
+        // its slack, which `check` asserts in debug builds.
         unsafe {
             let (a, b) = (*cell, *cell.add(1));
             *cell = a + rest;
@@ -732,6 +735,7 @@ fn span(v0: f32, v1: f32, back: u32) -> (i32, i32, i32) {
 /// `ceil(value)` as an integer, for a coordinate inside the raster, as `index_of` truncates one.
 #[inline(always)]
 fn ceil_index(value: f32) -> i32 {
+    // SAFETY: as in `index_of`.
     unsafe { crate::platform::ceil_i32_unchecked(value) }
 }
 

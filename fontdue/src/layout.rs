@@ -1,7 +1,7 @@
 pub use crate::unicode::CharacterData;
 
 use crate::FontRepr;
-use crate::unicode::{LINEBREAK_NONE, LinebreakData, Linebreaker, read_utf8};
+use crate::unicode::{LINEBREAK_NONE, LinebreakData, Linebreaker};
 use crate::{
     Metrics,
     platform::{ceil, floor},
@@ -445,10 +445,7 @@ impl<'a, U: Copy + Clone> Layout<U> {
             }
         }
 
-        let mut byte_offset = 0;
-        while byte_offset < style.text.len() {
-            let prev_byte_offset = byte_offset;
-            let character = read_utf8(style.text.as_bytes(), &mut byte_offset);
+        for (prev_byte_offset, character) in style.text.char_indices() {
             let linebreak = self.linebreaker.next(character).mask(self.wrap_mask);
             let glyph_index = font.lookup_glyph_index(character);
             let char_data = CharacterData::classify(character, glyph_index);
@@ -528,7 +525,7 @@ impl<'a, U: Copy + Clone> Layout<U> {
             return;
         }
 
-        unsafe { self.output.set_len(0) };
+        self.output.clear();
         self.output.reserve(self.glyphs.len());
 
         let dir = if self.flip {

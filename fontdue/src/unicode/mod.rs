@@ -3,43 +3,11 @@ mod tables;
 use crate::unicode::tables::*;
 use alloc::string::String;
 
-const CONT_MASK: u8 = 0b0011_1111;
-
-#[inline(always)]
-fn utf8_acc_cont_byte(ch: u32, byte: u8) -> u32 {
-    (ch << 6) | (byte & CONT_MASK) as u32
-}
-
 /// Big-endian UTF-16, as the `name` table stores it. Font data is untrusted: unpaired surrogates
 /// decode to U+FFFD, and a trailing odd byte is dropped.
 pub fn decode_utf16(bytes: &[u8]) -> String {
     let units = bytes.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
     core::char::decode_utf16(units).map(|c| c.unwrap_or(core::char::REPLACEMENT_CHARACTER)).collect()
-}
-
-/// Returns (length, character). Cannot be run at the end of the string.
-pub fn read_utf8(bytes: &[u8], byte_offset: &mut usize) -> char {
-    let x = bytes[*byte_offset];
-    *byte_offset += 1;
-    if x < 128 {
-        return unsafe { core::char::from_u32_unchecked(x as u32) };
-    }
-    let init = (x & (0x7F >> 2)) as u32;
-    let y = bytes[*byte_offset];
-    *byte_offset += 1;
-    let mut ch = utf8_acc_cont_byte(init, y);
-    if x >= 0xE0 {
-        let z = bytes[*byte_offset];
-        *byte_offset += 1;
-        let y_z = utf8_acc_cont_byte((y & CONT_MASK) as u32, z);
-        ch = init << 12 | y_z;
-        if x >= 0xF0 {
-            let w = bytes[*byte_offset];
-            *byte_offset += 1;
-            ch = (init & 7) << 18 | utf8_acc_cont_byte(y_z, w);
-        }
-    }
-    unsafe { core::char::from_u32_unchecked(ch) }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -251,11 +251,13 @@ fn fontdue_font_from_file_impl(
     };
     let glyph_count = glyph_indices.len() as u16;
     assert!(store || grid.is_none(), "grid: only applies with store: true");
-    let (glyph_items, glyph_methods) = if store {
+    let (glyph_items, glyph_methods, infos) = if store {
         store_items(&font, &glyph_indices, grid.unwrap_or(16), &type_name)
     } else {
-        let glyphs = glyph_indices.iter().map(|index| &font.internal_glyph_slice()[*index as usize]);
-        let glyphs = glyphs_to_tokens(&glyphs.collect::<Vec<_>>());
+        let glyphs: Vec<_> =
+            glyph_indices.iter().map(|index| &font.internal_glyph_slice()[*index as usize]).collect();
+        let infos = glyphs.iter().map(|glyph| fontdue::PathGlyph::from_glyph(glyph).info()).collect();
+        let glyphs = glyphs_to_tokens(&glyphs);
         (
             quote! {},
             quote! {
@@ -265,13 +267,19 @@ fn fontdue_font_from_file_impl(
                     GLYPHS[index as usize].into()
                 }
             },
+            infos,
         )
     };
+    let capacity = raster_capacity_tokens(&infos, units_per_em);
     quote! {
         #glyph_items
 
         #[derive(Clone, Copy)]
         pub struct #type_name;
+
+        impl #type_name {
+            #capacity
+        }
 
         impl ::fontdue::FontRepr for #type_name {
             #[inline(always)]
@@ -327,12 +335,55 @@ fn fontdue_font_from_file_impl(
 
 /// The store-backed half of a baked font: the store's tables as statics, and the `FontRepr`
 /// methods that draw from them.
+/// `raster_capacity` for glyphs with these outlines, from the largest diagonal among them.
+fn raster_capacity_tokens(infos: &[fontdue::OutlineInfo], units_per_em: f32) -> proc_macro2::TokenStream {
+    let diagonal = infos
+        .iter()
+        .map(|info| f64::from(info.bounds.width).hypot(f64::from(info.bounds.height)) * f64::from(info.unit))
+        .fold(0.0, f64::max);
+    // Rounded up, so the device's product is never below the exact one.
+    let mut diagonal_f32 = diagonal as f32;
+    if f64::from(diagonal_f32) < diagonal {
+        diagonal_f32 = f32::from_bits(diagonal_f32.to_bits() + 1);
+    }
+    quote! {
+        /// Raster buffer length, in f32s and including the three slack slots, that fits any glyph
+        /// of this font at `px`, upright or under a transform that lengthens vectors by at most
+        /// `stretch` (1 for a rotation), at any pen. It is at least what
+        /// `fontdue::transformed_raster_capacity` gives for the same font, `px` and transform,
+        /// and being `const` it can size a static buffer for `Raster::from_slice`.
+        ///
+        /// # Panics
+        ///
+        /// If `px` or `stretch` is not positive and finite, or the length overflows `usize`.
+        pub const fn raster_capacity(px: f32, stretch: f32) -> usize {
+            assert!(
+                px > 0.0 && px <= f32::MAX && stretch > 0.0 && stretch <= f32::MAX,
+                "px and stretch must be positive and finite"
+            );
+            let exact = stretch * (#diagonal_f32 * (px / #units_per_em));
+            // The ceiling, by conversion: `f32::ceil` needs `std`. The conversion saturates, so
+            // an infinite side fails the multiplication below.
+            let whole = exact as usize;
+            let side = if (whole as f32) < exact { whole.saturating_add(1) } else { whole };
+            // One pixel more than `transformed_raster_capacity` adds, for the rounding that
+            // differs between this product and its per-glyph one.
+            let side = side.saturating_add(3);
+            match side.checked_mul(side) {
+                Some(area) if area <= usize::MAX - 3 => area + 3,
+                _ => panic!("raster dimensions overflow usize"),
+            }
+        }
+    }
+}
+
 fn store_items(
     font: &fontdue::Font,
     glyph_indices: &[u16],
     grid: u32,
     type_name: &proc_macro2::Ident,
-) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, Vec<fontdue::OutlineInfo>) {
+    use fontdue::OutlineSource;
     use fontdue::store::{Store, encode};
     let shift = grid.trailing_zeros() as u8;
     let inputs: Vec<encode::GlyphInput> = glyph_indices
@@ -418,5 +469,6 @@ fn store_items(
             )
         }
     };
-    (items, methods)
+    let infos = (0..glyph_indices.len() as u16).map(|glyph| store.info(glyph)).collect();
+    (items, methods, infos)
 }

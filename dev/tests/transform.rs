@@ -315,6 +315,37 @@ fn pen_offsets_sum_kerned_advances() {
     assert!(advance('T').fract() != 0.0, "the check needs an advance that is not a whole pixel");
 }
 
+/// Computed at compile time, so a static buffer can be sized by it.
+const BAKED_CAPACITY_24: usize = BakedRoboto::raster_capacity(24.0, 1.0);
+
+/// The macro's `const` capacity is at least the runtime one over every character of the font,
+/// and not much more, for raw and store fonts.
+#[test]
+fn baked_capacity_covers_the_font() {
+    let font = roboto_32();
+    let text: String = font.chars().keys().collect();
+    // The largest singular value of the stretch, as `Transform::stretch` computes it.
+    let (a, b, c, d) = (1.7f32, 0.4f32, 0.0f32, 0.8f32);
+    let sum = a * a + b * b + c * c + d * d;
+    let det = a * d - b * c;
+    let stretch = ((sum + (sum * sum - 4.0 * det * det).sqrt()) / 2.0).sqrt();
+    let fonts: [(&dyn FontRepr, fn(f32, f32) -> usize); 2] =
+        [(&BakedRoboto, BakedRoboto::raster_capacity), (&StoreRoboto, StoreRoboto::raster_capacity)];
+    for (font, capacity) in fonts {
+        for px in [8.0, 24.0, 64.0, 300.0] {
+            for (transform, stretch) in [(Transform::IDENTITY, 1.0), (Transform::new(a, b, c, d), stretch)] {
+                let runtime = fontdue::transformed_raster_capacity(font, &text, px, transform);
+                let baked = capacity(px, stretch);
+                assert!(
+                    runtime <= baked && baked <= runtime * 5 / 4 + 64,
+                    "{baked} against {runtime} at {px}"
+                );
+            }
+        }
+    }
+    assert_eq!(BAKED_CAPACITY_24, BakedRoboto::raster_capacity(24.0, 1.0));
+}
+
 /// The capacity fits every glyph of the text at every angle and pen, for a rotation and for a
 /// rotation after a stretch, and works through `dyn FontRepr`.
 #[test]

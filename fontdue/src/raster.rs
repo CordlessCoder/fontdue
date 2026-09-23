@@ -111,10 +111,12 @@ impl<'a> Raster<'a> {
 
 /// Float-to-int for the line loops.
 ///
-/// Lines are only drawn through a `Sink`, which `rasterize_with` makes for a raster sized from
-/// `metrics_raw`, and every glyph kind promises its points lie inside the bounds those metrics came
-/// from (see `outline`). Every value converted here is a pixel coordinate inside those bounds, so
-/// the unchecked convert has its precondition. This
+/// Lines are only drawn through a `Sink`. Upright, `font::rasterize_with` makes it for a raster
+/// sized from `metrics_raw`, and every glyph kind promises its points lie inside the bounds those
+/// metrics came from (see `outline`). Transformed, `transform::rasterize_with` sizes the raster
+/// from the transformed points and clamps every point into it before `Sink::placed`. Either way
+/// every value converted here is a pixel coordinate inside the raster, so the unchecked convert
+/// has its precondition. This
 /// is the same trust `add` already places in the caller, and the notice at the top of the file is
 /// about exactly this.
 #[inline(always)]
@@ -129,6 +131,8 @@ pub struct Sink<'s, 'b> {
     /// buffer holds `w * h + 3` cells, `resize` having sized it for the glyph.
     cells: *mut f32,
     w: i32,
+    #[cfg(debug_assertions)]
+    len: usize,
     /// Scalars, not the `f32x4`s the walk takes: read back from memory in a source's out-of-line
     /// `draw`, duplicated lanes are separate loads and separate live registers.
     scale_x: f32,
@@ -150,6 +154,8 @@ impl<'s, 'b> Sink<'s, 'b> {
         offset_y: f32,
     ) -> Self {
         let w = raster.w as i32;
+        #[cfg(debug_assertions)]
+        let len = raster.w * raster.h + 3;
         let cells = match &mut raster.a {
             RasterBuffer::Owned(a) => a.as_mut_ptr(),
             RasterBuffer::Borrowed(a) => a.as_mut_ptr(),
@@ -157,6 +163,8 @@ impl<'s, 'b> Sink<'s, 'b> {
         Sink {
             cells,
             w,
+            #[cfg(debug_assertions)]
+            len,
             scale_x,
             scale_y,
             inv_x: 1.0 / scale_x,
@@ -194,6 +202,22 @@ impl<'s, 'b> Sink<'s, 'b> {
         }
     }
 
+    /// Draws a segment whose points are already in raster space and inside it, as the
+    /// transformed draw passes them, skipping it when it has no vertical extent.
+    #[inline(always)]
+    pub(crate) fn placed(&mut self, start: Point, end: Point) {
+        let Some(line) = crate::transform::placed_line(start, end) else {
+            return;
+        };
+        let (nudge, adjustment, params) = line.raster_parts();
+        let (x0, _, x1, _) = line.coords.copied();
+        if x0 == x1 {
+            self.v_line(line.coords, nudge, adjustment);
+        } else {
+            self.m_line(line.coords, nudge, adjustment, params);
+        }
+    }
+
     /// The line's coordinates in raster space.
     #[inline(always)]
     fn place(&self, line: &Line) -> f32x4 {
@@ -216,6 +240,8 @@ impl<'s, 'b> Sink<'s, 'b> {
 
     #[inline(always)]
     fn add(&mut self, index: usize, height: f32, mid_x: f32) {
+        #[cfg(debug_assertions)]
+        assert!(index + 1 < self.len, "raster write out of bounds");
         // This is fast and hip.
         unsafe {
             let m = height * mid_x;

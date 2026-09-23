@@ -674,6 +674,12 @@ unsafe impl crate::OutlineSource for Store<'_> {
             sink.segment(segment);
         }
     }
+
+    fn visit(&self, glyph: u16, f: &mut dyn FnMut([f32; 4])) {
+        for segment in self.lines(glyph) {
+            f(segment);
+        }
+    }
 }
 
 // SAFETY: `segments` yields exactly what `draw` passes to the sink.

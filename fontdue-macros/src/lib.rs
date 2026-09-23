@@ -384,6 +384,26 @@ fn store_items(
         ) -> (::fontdue::Metrics, ::fontdue::raster::BitmapIter<'r>) {
             ::fontdue::font::rasterize_source_indexed(canvas, &#name, index, px, self.scale_factor(px), 3.0)
         }
+
+        #[inline]
+        fn rasterize_indexed_transformed<'r>(
+            &self,
+            canvas: &'r mut ::fontdue::raster::Raster<'_>,
+            index: u16,
+            px: f32,
+            transform: ::fontdue::Transform,
+            pen: (f32, f32),
+        ) -> (::fontdue::TransformedMetrics, ::fontdue::raster::BitmapIter<'r>) {
+            ::fontdue::rasterize_source_transformed_indexed(
+                canvas,
+                &#name,
+                index,
+                px,
+                self.scale_factor(px),
+                transform,
+                pen,
+            )
+        }
     };
     (items, methods)
 }

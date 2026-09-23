@@ -43,6 +43,11 @@ pub unsafe trait OutlineSource {
     /// belong in it too: the upright sink skips them, and a transformed draw needs them to close
     /// each contour.
     fn draw(&self, glyph: u16, sink: &mut Sink<'_, '_>);
+
+    /// Passes the segments `draw` passes to `f`, for the transformed draw, which visits a glyph
+    /// twice: once to measure it and once to draw it. It clamps what it draws into the raster,
+    /// so these segments carry no safety requirement, but the two visits should agree.
+    fn visit(&self, glyph: u16, f: &mut dyn FnMut([f32; 4]));
 }
 
 /// An [`OutlineSource`] whose segments also come out of an iterator, which is what the generic
@@ -170,6 +175,20 @@ impl<'a> GlyphRef<'a> {
     #[inline(always)]
     pub fn info(&self) -> OutlineInfo {
         self.info
+    }
+
+    /// Passes every segment, horizontal ones included, to `f`.
+    #[inline(always)]
+    pub(crate) fn visit(&self, mut f: impl FnMut([f32; 4])) {
+        match self.outline {
+            Outline::Lines(v_lines, m_lines, h_lines) => {
+                for line in v_lines.iter().chain(m_lines).chain(h_lines) {
+                    let (x0, y0, x1, y1) = line.coords.copied();
+                    f([x0, y0, x1, y1]);
+                }
+            }
+            Outline::Source(source, glyph) => source.visit(glyph, &mut f),
+        }
     }
 
     #[inline(always)]

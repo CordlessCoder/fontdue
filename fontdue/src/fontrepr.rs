@@ -1,5 +1,5 @@
 use crate::{
-    LineMetrics, Metrics,
+    LineMetrics, Metrics, Transform, TransformedMetrics,
     layout::GlyphRasterConfig,
     outline::GlyphRef,
     raster::{BitmapIter, Raster},
@@ -282,6 +282,46 @@ pub trait FontRepr {
         let scale = self.scale_factor(px);
         let metrics = crate::font::rasterize_inner(canvas, glyph, scale, 3.0);
         (metrics, canvas.get_bitmap_iter())
+    }
+
+    /// Rasterizes the glyph at `index` under `transform`, about the pen point `pen` in absolute
+    /// device pixels. `px` sets the size and `transform` the shape; a transform that scales up
+    /// coarsens curves as a larger `px` does. Advance along the baseline by
+    /// `transform.apply(advance_width, 0.0)`, with the unrounded advance from `metrics_indexed`.
+    ///
+    /// # Panics
+    ///
+    /// On a `px` `scale_factor` rejects, a `pen` that is not finite or whose floor does not fit
+    /// `i32`, or a transformed glyph that does not fit `i32`.
+    fn rasterize_indexed_transformed<'r>(
+        &self,
+        canvas: &'r mut Raster<'_>,
+        index: u16,
+        px: f32,
+        transform: Transform,
+        pen: (f32, f32),
+    ) -> (TransformedMetrics, BitmapIter<'r>) {
+        if px == 0.0 {
+            canvas.resize(0, 0);
+            return (TransformedMetrics::default(), canvas.get_bitmap_iter());
+        }
+        let glyph = &self.get_glyph_at_index(index);
+        let scale = self.scale_factor(px);
+        let metrics = crate::rasterize_transformed(canvas, glyph, scale, transform, pen);
+        (metrics, canvas.get_bitmap_iter())
+    }
+
+    /// [`rasterize_indexed_transformed`](FontRepr::rasterize_indexed_transformed) for a
+    /// character.
+    fn rasterize_transformed<'r>(
+        &self,
+        canvas: &'r mut Raster<'_>,
+        character: char,
+        px: f32,
+        transform: Transform,
+        pen: (f32, f32),
+    ) -> (TransformedMetrics, BitmapIter<'r>) {
+        self.rasterize_indexed_transformed(canvas, self.lookup_glyph_index(character), px, transform, pen)
     }
 
     /// Checks if the font has a glyph for the given character.

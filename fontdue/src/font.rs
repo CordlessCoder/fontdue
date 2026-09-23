@@ -285,7 +285,7 @@ fn convert_name(face: &Face) -> Option<String> {
 }
 
 /// Largest `f32` below `i32::MAX`. Above this `as_i32` saturates instead of converting.
-const MAX_DIMENSION: f32 = 2147483520.0;
+pub(crate) const MAX_DIMENSION: f32 = 2147483520.0;
 
 /// Internal function to generate the metrics, offset_x, and offset_y of the glyph.
 ///

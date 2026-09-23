@@ -200,6 +200,12 @@ unsafe impl fontdue::OutlineSource for ReplayedFont {
             sink.segment(segment);
         }
     }
+
+    fn visit(&self, glyph: u16, f: &mut dyn FnMut([f32; 4])) {
+        for segment in fontdue::SegmentSource::segments(self, glyph) {
+            f(segment);
+        }
+    }
 }
 
 // SAFETY: the same segments `draw` passes, which lie inside the halved bounds.

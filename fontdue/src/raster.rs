@@ -4,7 +4,7 @@
  * is safe. Please be aware of this.
  */
 
-use crate::math::{Line, Point};
+use crate::math::Point;
 
 /// Whether a scale keeps every coordinate the sources may have, zero or at least 2^-60, at zero or
 /// at least 2^-80.
@@ -16,7 +16,7 @@ fn safe_scale(scale: f32) -> bool {
 fn safe_offset(offset: f32) -> bool {
     offset == 0.0 || offset >= f32::from_bits((127 - 100) << 23)
 }
-use crate::platform::{abs, as_i32_unchecked, copysign, f32x4, mul_add};
+use crate::platform::{abs, as_i32_unchecked, f32x4, half_of, halve, mul_add, recip2};
 use alloc::vec::*;
 use core::iter::FusedIterator;
 use core::marker::PhantomData;
@@ -125,11 +125,10 @@ impl<'a> Raster<'a> {
 /// Lines are only drawn through a `Sink`. Upright, `font::rasterize_with` makes it for a raster
 /// sized from `metrics_raw`, and every glyph kind promises its points lie inside the bounds those
 /// metrics came from (see `outline`). Transformed, `transform::rasterize_with` sizes the raster
-/// from the transformed points and clamps every point into it before `Sink::placed`. Either way
+/// from the transformed points and clamps every point into it before `Sink::edge`. Either way
 /// every value converted here is a pixel coordinate inside the raster, so the unchecked convert
-/// has its precondition. This
-/// is the same trust `add` already places in the caller, and the notice at the top of the file is
-/// about exactly this.
+/// has its precondition. This is the same trust `add` already places in the caller, and the
+/// notice at the top of the file is about exactly this.
 #[inline(always)]
 fn index_of(value: f32) -> i32 {
     unsafe { as_i32_unchecked(value) }
@@ -138,24 +137,43 @@ fn index_of(value: f32) -> i32 {
 /// Where an [`OutlineSource`](crate::OutlineSource) sends a glyph's contours. Only the raster
 /// makes one, sized and scaled for the glyph being drawn.
 pub struct Sink<'s, 'b> {
-    /// The raster's cells, taken out of it once so nothing in the line walk can alias them. The
-    /// buffer holds `w * h + 3` cells, `resize` having sized it for the glyph.
-    cells: *mut f32,
-    w: i32,
-    #[cfg(debug_assertions)]
-    len: usize,
-    /// Scalars, not the `f32x4`s the walk takes: read back from memory in a source's out-of-line
-    /// `draw`, duplicated lanes are separate loads and separate live registers.
-    scale_x: f32,
-    scale_y: f32,
-    offset_x: f32,
-    offset_y: f32,
+    cells: Cells,
+    place: Place,
     /// Where the next `line_to` starts, placed.
     last: Point,
     /// Whether segments need `placed`'s guards: set when the scale or an offset is too small for
     /// the sources' coordinate rule to keep placed deltas normal.
     guard: bool,
     _raster: PhantomData<&'s mut Raster<'b>>,
+}
+
+/// The raster's cells, taken out of it once so nothing in the line walk can alias them. The
+/// buffer holds `w * h + 3` cells, `resize` having sized it for the glyph. The draw loops copy it
+/// into a local, so the compiler can see that writes to the cells leave it alone.
+#[derive(Clone, Copy)]
+struct Cells {
+    ptr: *mut f32,
+    w: i32,
+    #[cfg(debug_assertions)]
+    len: usize,
+}
+
+/// Source units to raster space. Scalars, not the `f32x4`s the walk takes: read back from memory
+/// in a source's out-of-line `draw`, duplicated lanes are separate loads and separate live
+/// registers.
+#[derive(Clone, Copy)]
+struct Place {
+    scale_x: f32,
+    scale_y: f32,
+    offset_x: f32,
+    offset_y: f32,
+}
+
+impl Place {
+    #[inline(always)]
+    fn apply(self, [x, y]: [f32; 2]) -> Point {
+        Point::new(x * self.scale_x + self.offset_x, y * self.scale_y + self.offset_y)
+    }
 }
 
 impl<'s, 'b> Sink<'s, 'b> {
@@ -170,19 +188,23 @@ impl<'s, 'b> Sink<'s, 'b> {
         let w = raster.w as i32;
         #[cfg(debug_assertions)]
         let len = raster.w * raster.h + 3;
-        let cells = match &mut raster.a {
+        let ptr = match &mut raster.a {
             RasterBuffer::Owned(a) => a.as_mut_ptr(),
             RasterBuffer::Borrowed(a) => a.as_mut_ptr(),
         };
         Sink {
-            cells,
-            w,
-            #[cfg(debug_assertions)]
-            len,
-            scale_x,
-            scale_y,
-            offset_x,
-            offset_y,
+            cells: Cells {
+                ptr,
+                w,
+                #[cfg(debug_assertions)]
+                len,
+            },
+            place: Place {
+                scale_x,
+                scale_y,
+                offset_x,
+                offset_y,
+            },
             last: Point::new(offset_x, offset_y),
             guard: !(safe_scale(scale_x)
                 && safe_scale(scale_y)
@@ -195,7 +217,7 @@ impl<'s, 'b> Sink<'s, 'b> {
     /// Starts a contour at `point`, in the source's point units.
     #[inline(always)]
     pub fn move_to(&mut self, point: [f32; 2]) {
-        self.last = self.place(point);
+        self.last = self.place.apply(point);
     }
 
     /// Draws the segment from the previous point to `point`, or skips it when it has no vertical
@@ -204,11 +226,11 @@ impl<'s, 'b> Sink<'s, 'b> {
     /// walk, stay in bounds.
     #[inline(always)]
     pub fn line_to(&mut self, point: [f32; 2]) {
-        let placed = self.place(point);
+        let placed = self.place.apply(point);
         if self.guard {
-            self.placed(self.last, placed);
+            self.cells.placed(self.last, placed);
         } else {
-            self.edge(self.last, placed);
+            self.cells.edge(self.last, placed);
         }
         self.last = placed;
     }
@@ -227,11 +249,12 @@ impl<'s, 'b> Sink<'s, 'b> {
 
     #[inline(always)]
     fn contours_with<const GUARD: bool>(&mut self, points: &[[f32; 2]], contours: &[u32]) {
+        let (cells, place) = (self.cells, self.place);
         crate::outline::each_contour(points, contours, |&first, rest| {
-            let mut last = self.place(first);
+            let mut last = place.apply(first);
             for &point in rest {
-                let placed = self.place(point);
-                self.edge_with::<GUARD>(last, placed);
+                let placed = place.apply(point);
+                cells.edge_with::<GUARD>(last, placed);
                 last = placed;
             }
         });
@@ -249,13 +272,14 @@ impl<'s, 'b> Sink<'s, 'b> {
 
     #[inline(always)]
     fn path_with<const GUARD: bool>(&mut self, events: impl Iterator<Item = crate::PathEvent>) {
+        let (cells, place) = (self.cells, self.place);
         let mut last = self.last;
         for event in events {
             match event {
-                crate::PathEvent::MoveTo(p) => last = self.place(p),
+                crate::PathEvent::MoveTo(p) => last = place.apply(p),
                 crate::PathEvent::LineTo(p) => {
-                    let placed = self.place(p);
-                    self.edge_with::<GUARD>(last, placed);
+                    let placed = place.apply(p);
+                    cells.edge_with::<GUARD>(last, placed);
                     last = placed;
                 }
             }
@@ -263,8 +287,17 @@ impl<'s, 'b> Sink<'s, 'b> {
         self.last = last;
     }
 
+    /// Draws a segment whose points are in raster space and inside it, as [`Cells::edge`]: every
+    /// coordinate must be zero or at least 2^-100, so the deltas are zero or normal.
     #[inline(always)]
-    fn edge_with<const GUARD: bool>(&mut self, start: Point, end: Point) {
+    pub(crate) fn edge(&mut self, start: Point, end: Point) {
+        self.cells.edge(start, end);
+    }
+}
+
+impl Cells {
+    #[inline(always)]
+    fn edge_with<const GUARD: bool>(self, start: Point, end: Point) {
         if GUARD {
             self.placed(start, end);
         } else {
@@ -272,144 +305,400 @@ impl<'s, 'b> Sink<'s, 'b> {
         }
     }
 
-    /// A point in raster space.
-    #[inline(always)]
-    fn place(&self, [x, y]: [f32; 2]) -> Point {
-        Point::new(x * self.scale_x + self.offset_x, y * self.scale_y + self.offset_y)
-    }
-
     /// A placed segment from a source, skipping it when it has no vertical extent. Only for a
     /// sink without `guard`: then the sources' coordinate rule and the scale keep both deltas zero
     /// or normal.
     #[inline(always)]
-    fn edge(&mut self, start: Point, end: Point) {
+    fn edge(self, start: Point, end: Point) {
         if start.y == end.y {
             return;
         }
-        let line = Line::at_draw(start, end);
-        let (nudge, adjustment, params) = line.raster_parts();
-        if start.x == end.x {
-            self.v_line(line.coords, nudge, adjustment);
-        } else {
-            self.m_line(line.coords, nudge, adjustment, params);
-        }
+        self.segment(start, end, end.x - start.x, end.y - start.y, start.x == end.x);
     }
 
     /// Draws a segment whose points are in raster space and inside it, skipping it when it has
     /// no vertical extent. Deltas too small to be normal count as zero, since the reciprocal is
     /// only accurate for normal values; a tiny scale can make them so from normal source deltas.
     #[inline(always)]
-    pub(crate) fn placed(&mut self, start: Point, end: Point) {
-        let Some(line) = crate::transform::placed_line(start, end) else {
+    fn placed(self, start: Point, end: Point) {
+        let dy = end.y - start.y;
+        if !(abs(dy) >= f32::MIN_POSITIVE) {
             return;
-        };
-        let (nudge, adjustment, params) = line.raster_parts();
-        let (x0, _, x1, _) = line.coords.copied();
-        if x0 == x1 {
-            self.v_line(line.coords, nudge, adjustment);
+        }
+        let dx = end.x - start.x;
+        let vertical = !(abs(dx) >= f32::MIN_POSITIVE);
+        let end_x = if vertical {
+            start.x
         } else {
-            self.m_line(line.coords, nudge, adjustment, params);
+            end.x
+        };
+        self.segment(start, Point::new(end_x, end.y), dx, dy, vertical);
+    }
+
+    /// Walks the segment from `start` to `end`, whose deltas are `dx` and `dy`, `dy` normal. A
+    /// `vertical` segment shares x at both ends; any other has `dx` normal.
+    #[inline(always)]
+    fn segment(self, start: Point, end: Point, dx: f32, dy: f32, vertical: bool) {
+        let coords = f32x4::new(start.x, start.y, end.x, end.y);
+        // Whether the segment runs up and left, from the deltas' signs.
+        let up = dy.to_bits() >> 31;
+        let down = 1 - up;
+        if vertical {
+            self.v_line(coords, up);
+        } else {
+            let left = dx.to_bits() >> 31;
+            let right = 1 - left;
+            let (tdx, tdy) = recip2(dx, dy);
+            let params = f32x4::new(tdx, tdy, dx, dy);
+            let step = [right as i32 - left as i32, down as i32 - up as i32];
+            self.m_line(coords, [left, up], step, params);
         }
     }
 
+    /// The cell at `index`. The walks step this pointer rather than an index, which keeps the
+    /// buffer's base out of the crossing loop's registers.
     #[inline(always)]
-    fn add(&mut self, index: usize, height: f32, mid_x: f32) {
+    fn at(self, index: i32) -> *mut f32 {
+        self.ptr.wrapping_offset(index as isize)
+    }
+
+    #[inline(always)]
+    fn add(self, cell: *mut f32, height: f32, mid_x: f32) {
+        let m = height * mid_x;
+        self.add_parts(cell, height - m, m);
+    }
+
+    /// In debug builds, that `cell` and the one after it are inside the buffer.
+    #[inline(always)]
+    fn check(self, cell: *mut f32) {
         #[cfg(debug_assertions)]
-        assert!(index + 1 < self.len, "raster write out of bounds");
-        // This is fast and hip.
+        assert!(
+            (cell as usize).wrapping_sub(self.ptr as usize) / 4 + 1 < self.len,
+            "raster write out of bounds"
+        );
+        let _ = cell;
+    }
+
+    /// `add_parts(cell, rest, m)` in each of `rows` rows from `cell`, stepping `inc` cells a row.
+    /// Returns the cell after the last.
+    #[inline(always)]
+    fn whole_rows(self, cell: *mut f32, rows: i32, inc: i32, rest: f32, m: f32) -> *mut f32 {
+        #[cfg(target_arch = "xtensa")]
+        {
+            for row in 0..rows {
+                self.check(cell.wrapping_offset((row * inc) as isize));
+            }
+            if rows <= 0 {
+                return cell;
+            }
+            let mut cell = cell;
+            let mut rows = rows;
+            // SAFETY: the rows are the ones the loop below would visit, each inside the raster
+            // as `add_parts` requires. Both loads come before both sums, which LLVM does not do:
+            // each sum then waits on its load and the store on its sum only once.
+            unsafe {
+                core::arch::asm!(
+                    "1:",
+                    "lsi   {a}, {cell}, 0",
+                    "lsi   {b}, {cell}, 4",
+                    "add.s {a}, {a}, {rest}",
+                    "add.s {b}, {b}, {m}",
+                    "addi  {rows}, {rows}, -1",
+                    "ssi   {a}, {cell}, 0",
+                    "ssi   {b}, {cell}, 4",
+                    "add   {cell}, {cell}, {inc}",
+                    "bnez  {rows}, 1b",
+                    cell = inout(reg) cell,
+                    rows = inout(reg) rows,
+                    inc = in(reg) inc * 4,
+                    rest = in(freg) rest,
+                    m = in(freg) m,
+                    a = out(freg) _,
+                    b = out(freg) _,
+                    options(nostack)
+                );
+            }
+            let _ = rows;
+            cell
+        }
+        #[cfg(not(target_arch = "xtensa"))]
+        {
+            let mut cell = cell;
+            for _ in 0..rows {
+                self.add_parts(cell, rest, m);
+                cell = cell.wrapping_offset(inc as isize);
+            }
+            cell
+        }
+    }
+
+    /// Adds a segment's area in a cell: `rest` to the cell and `m` to the one after it.
+    #[inline(always)]
+    fn add_parts(self, cell: *mut f32, rest: f32, m: f32) {
+        self.check(cell);
+        // Both loads, then both sums, so the second sum's latency overlaps the first's rather
+        // than following it.
         unsafe {
-            let m = height * mid_x;
-            let cell = self.cells.add(index);
-            *cell += height - m;
-            *cell.add(1) += m;
+            let (a, b) = (*cell, *cell.add(1));
+            *cell = a + rest;
+            *cell.add(1) = b + m;
         }
-
-        // This is safe but slow.
-        // let m = height * mid_x;
-        // self.a[index] += height - m;
-        // self.a[index + 1] += m;
     }
 
     #[inline(always)]
-    fn v_line(&mut self, coords: f32x4, nudge: [u32; 4], adjustment: [i32; 2]) {
+    fn v_line(self, coords: f32x4, up: u32) {
         let (x0, y0, _, y1) = coords.copied();
-        let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
-        let mut target_y = (start_y + adjustment[1]) as f32;
-        let sy = copysign(1f32, y1 - y0);
+        let start_x = index_of(x0);
+        let (start_y, end_y, target_y) = span(y0, y1, up);
         let w = self.w;
-        let mut y_prev = y0;
-        let mut index = start_x + start_y * w;
-        let index_y_inc = with_sign_of(w, y1 - y0);
-        let mut dist = (start_y - end_y).abs();
+        let step = 1 - 2 * up as i32;
+        let index_y_inc = step * w;
+        let dist = (start_y - end_y).abs();
         let mid_x = fract_of(x0);
-        while dist > 0 {
-            dist -= 1;
-            self.add(index as usize, y_prev - target_y, mid_x);
-            index += index_y_inc;
-            y_prev = target_y;
-            target_y += sy;
+        let mut cell = self.at(start_x + start_y * w);
+        let mut y_prev = y0;
+        if dist > 0 {
+            self.add(cell, y0 - target_y as f32, mid_x);
+            cell = cell.wrapping_offset(index_y_inc as isize);
+            // Every row between the first and the last is whole: row edges are integers, so its
+            // height is exactly one, against the direction, and so are the two parts of it.
+            let height = -step as f32;
+            let m = height * mid_x;
+            let rest = height - m;
+            cell = self.whole_rows(cell, dist - 1, index_y_inc, rest, m);
+            y_prev = (target_y + (dist - 1) * step) as f32;
         }
-        self.add((end_x + end_y * w) as usize, y_prev - y1, mid_x);
+        // `dist` steps of one row from the start cell end in the end cell.
+        self.add(cell, y_prev - y1, mid_x);
     }
 
     #[inline(always)]
-    fn m_line(&mut self, coords: f32x4, nudge: [u32; 4], adjustment: [i32; 2], params: f32x4) {
+    fn m_line(self, coords: f32x4, back: [u32; 2], step: [i32; 2], params: f32x4) {
         let (x0, y0, x1, y1) = coords.copied();
-        let (start_x, start_y, end_x, end_y) = cells(coords, nudge);
+        // With the next column and row edge to cross. They are whole numbers, kept as integers so
+        // the loop holds two fewer floats; converting one where it is used is exact.
+        let (start_x, end_x, mut target_x) = span(x0, x1, back[0]);
+        let (start_y, end_y, mut target_y) = span(y0, y1, back[1]);
         let (tdx, tdy, dx, dy) = params.copied();
-        // The next column and row edge to cross. They are whole numbers, kept as integers so the
-        // loop holds two fewer floats; converting one where it is used is exact.
-        let mut target_x = start_x + adjustment[0];
-        let mut target_y = start_y + adjustment[1];
-        let step_x = with_sign_of(1, tdx);
-        let step_y = with_sign_of(1, tdy);
+        let [step_x, step_y] = step;
         let mut tmx = tdx * (target_x as f32 - x0);
         let mut tmy = tdy * (target_y as f32 - y0);
         let tdx = abs(tdx);
         let tdy = abs(tdy);
         let w = self.w;
-        let mut x_prev = x0;
+        // Halved, so each crossing's midpoint is a sum; halving is exact, so the midpoints are
+        // the same floats.
+        let hx0 = halve(x0);
+        let hdx = halve(dx);
+        let mut hx_prev = hx0;
         let mut y_prev = y0;
-        let mut index = start_x + start_y * w;
+        let mut cell = self.at(start_x + start_y * w);
         let index_y_inc = step_y * w;
         let dist = (start_x - end_x).unsigned_abs() + (start_y - end_y).unsigned_abs();
-        for _ in 0..dist {
-            let prev_index = index;
-            let y_next: f32;
-            let x_next: f32;
-            if tmx < tmy {
-                y_next = mul_add(tmx, dy, y0);
-                x_next = target_x as f32;
-                tmx += tdx;
-                target_x += step_x;
-                index += step_x;
-            } else {
-                y_next = target_y as f32;
-                x_next = mul_add(tmy, dx, x0);
-                tmy += tdy;
-                target_y += step_y;
-                index += index_y_inc;
-            }
-            self.add(prev_index as usize, y_prev - y_next, fract_of((x_prev + x_next) / 2.0));
-            x_prev = x_next;
-            y_prev = y_next;
+        // The next crossing: the cell it leaves, and the point it crosses at.
+        macro_rules! cross {
+            () => {{
+                let left = cell;
+                let y_next: f32;
+                let hx_next: f32;
+                if tmx < tmy {
+                    y_next = mul_add(tmx, dy, y0);
+                    hx_next = half_of(target_x);
+                    tmx += tdx;
+                    target_x += step_x;
+                    cell = cell.wrapping_offset(step_x as isize);
+                } else {
+                    y_next = target_y as f32;
+                    hx_next = mul_add(tmy, hdx, hx0);
+                    tmy += tdy;
+                    target_y += step_y;
+                    cell = cell.wrapping_offset(index_y_inc as isize);
+                }
+                (left, y_next, hx_next)
+            }};
         }
-        self.add((end_x + end_y * w) as usize, y_prev - y1, fract_of((x_prev + x1) / 2.0));
+        let pairs = dist / 2;
+        // Two crossings a trip, so the points alternate between two sets of registers instead of
+        // being moved from one to the other each crossing.
+        #[cfg(target_arch = "xtensa")]
+        let rust_pairs = if pairs >= 2 {
+            0
+        } else {
+            pairs
+        };
+        #[cfg(not(target_arch = "xtensa"))]
+        let rust_pairs = pairs;
+        for _ in 0..rust_pairs {
+            let (cell_a, y_a, hx_a) = cross!();
+            self.add(cell_a, y_prev - y_a, fract_of(hx_prev + hx_a));
+            let (cell_b, y_b, hx_b) = cross!();
+            self.add(cell_b, y_a - y_b, fract_of(hx_a + hx_b));
+            hx_prev = hx_b;
+            y_prev = y_b;
+        }
+        // The same two crossings, scheduled by hand: every float operation waits four cycles on
+        // the one it depends on, and this core issues in order, so the first crossing's area is
+        // worked into the second's step instead of after it. The operations, and the order of the
+        // writes, are the loop's above: the second crossing's cell can be the first's plus one,
+        // so its loads come after the first's stores.
+        #[cfg(target_arch = "xtensa")]
+        if pairs >= 2 {
+            let mut n = pairs;
+            // SAFETY: the cells written are the ones the loop above writes, each inside the
+            // raster as `add_parts` requires.
+            unsafe {
+                core::arch::asm!(
+                    "1:",
+                    "olt.s   b0, {tmx}, {tmy}",
+                    "bf      b0, 2f",
+                    "mov.s   {ya}, {y0}",
+                    "madd.s  {ya}, {tmx}, {dy}",
+                    "float.s {ha}, {tx}, 1",
+                    "add.s   {tmx}, {tmx}, {tdx}",
+                    "mov     {la}, {cell}",
+                    "addx4   {cell}, {sx}, {cell}",
+                    "add     {tx}, {tx}, {sx}",
+                    "j       3f",
+                    "2:",
+                    "mov.s   {ha}, {hx0}",
+                    "madd.s  {ha}, {tmy}, {hdx}",
+                    "float.s {ya}, {ty}, 0",
+                    "add.s   {tmy}, {tmy}, {tdy}",
+                    "mov     {la}, {cell}",
+                    "addx4   {cell}, {iy}, {cell}",
+                    "add     {ty}, {ty}, {sy}",
+                    "3:",
+                    // The first crossing's midpoint and height, over the previous point.
+                    "add.s   {hp}, {hp}, {ha}",
+                    "sub.s   {yp}, {yp}, {ya}",
+                    "olt.s   b0, {tmx}, {tmy}",
+                    "bf      b0, 4f",
+                    "mov.s   {yb}, {y0}",
+                    "madd.s  {yb}, {tmx}, {dy}",
+                    "trunc.s {ia}, {hp}, 0",
+                    "float.s {hb}, {tx}, 1",
+                    "add.s   {tmx}, {tmx}, {tdx}",
+                    "mov     {lb}, {cell}",
+                    "addx4   {cell}, {sx}, {cell}",
+                    "add     {tx}, {tx}, {sx}",
+                    "float.s {t1}, {ia}, 0",
+                    "j       5f",
+                    "4:",
+                    "mov.s   {hb}, {hx0}",
+                    "madd.s  {hb}, {tmy}, {hdx}",
+                    "trunc.s {ia}, {hp}, 0",
+                    "float.s {yb}, {ty}, 0",
+                    "add.s   {tmy}, {tmy}, {tdy}",
+                    "mov     {lb}, {cell}",
+                    "addx4   {cell}, {iy}, {cell}",
+                    "add     {ty}, {ty}, {sy}",
+                    "float.s {t1}, {ia}, 0",
+                    "5:",
+                    // Both crossings' fractions and parts, interleaved; the first's writes, then
+                    // the second's.
+                    "sub.s   {t1}, {hp}, {t1}",
+                    "add.s   {hp}, {ha}, {hb}",
+                    "sub.s   {ha}, {ya}, {yb}",
+                    "mul.s   {t1}, {yp}, {t1}",
+                    "trunc.s {ib}, {hp}, 0",
+                    "lsi     {ya}, {la}, 4",
+                    "float.s {t2}, {ib}, 0",
+                    "sub.s   {yp}, {yp}, {t1}",
+                    "add.s   {ya}, {ya}, {t1}",
+                    "sub.s   {t2}, {hp}, {t2}",
+                    "lsi     {hp}, {la}, 0",
+                    "mul.s   {t2}, {ha}, {t2}",
+                    "add.s   {hp}, {hp}, {yp}",
+                    "ssi     {ya}, {la}, 4",
+                    "sub.s   {ha}, {ha}, {t2}",
+                    "ssi     {hp}, {la}, 0",
+                    "lsi     {ya}, {lb}, 4",
+                    "lsi     {hp}, {lb}, 0",
+                    "add.s   {ya}, {ya}, {t2}",
+                    "add.s   {hp}, {hp}, {ha}",
+                    "addi    {n}, {n}, -1",
+                    "mov.s   {yp}, {yb}",
+                    "ssi     {ya}, {lb}, 4",
+                    "ssi     {hp}, {lb}, 0",
+                    "mov.s   {hp}, {hb}",
+                    "bnez    {n}, 1b",
+                    tmx = inout(freg) tmx,
+                    tmy = inout(freg) tmy,
+                    yp = inout(freg) y_prev,
+                    hp = inout(freg) hx_prev,
+                    tdx = in(freg) tdx,
+                    tdy = in(freg) tdy,
+                    dy = in(freg) dy,
+                    y0 = in(freg) y0,
+                    hdx = in(freg) hdx,
+                    hx0 = in(freg) hx0,
+                    ya = out(freg) _,
+                    ha = out(freg) _,
+                    yb = out(freg) _,
+                    hb = out(freg) _,
+                    t1 = out(freg) _,
+                    t2 = out(freg) _,
+                    cell = inout(reg) cell,
+                    tx = inout(reg) target_x,
+                    ty = inout(reg) target_y,
+                    n = inout(reg) n,
+                    sx = in(reg) step_x,
+                    sy = in(reg) step_y,
+                    iy = in(reg) index_y_inc,
+                    la = out(reg) _,
+                    lb = out(reg) _,
+                    ia = out(reg) _,
+                    ib = out(reg) _,
+                    out("b0") _,
+                    options(nostack)
+                );
+            }
+            let _ = n;
+        }
+        if dist % 2 == 1 {
+            // The last crossing: the walk's state after it is not read.
+            #[allow(unused_assignments)]
+            let (cell_a, y_a, hx_a) = cross!();
+            self.add(cell_a, y_prev - y_a, fract_of(hx_prev + hx_a));
+            hx_prev = hx_a;
+            y_prev = y_a;
+        }
+        self.add(self.at(end_x + end_y * w), y_prev - y1, fract_of(hx_prev + halve(x1)));
     }
 }
 
-/// The pixel column and row each end of a line lies in, after the nudges. The loops keep indices
-/// and step counts as integers from here on and convert nothing back.
-///
-/// A nudge of 1 steps a coordinate down to the next float by subtracting one from its bits. The
-/// nudges stay integers throughout: as `f32` bit patterns they were a choice between two float
-/// constants, which LLVM at opt-level 2 and above turns into a constant-pool table that the Xtensa
-/// backend fails to select.
+/// The cells a segment starts and ends in along one axis, and the first cell edge it crosses,
+/// for a segment from `v0` to `v1` that runs toward lower coordinates when `back` is 1. A
+/// coordinate exactly on an edge belongs to the cell the segment is inside of there: the one
+/// below the edge at the start of a segment running back, or at the end of one running forward.
+/// Neither of those coordinates is zero, since the other end is lower still.
 #[inline(always)]
-fn cells(coords: f32x4, nudge: [u32; 4]) -> (i32, i32, i32, i32) {
-    let (x0, y0, x1, y1) = coords.copied();
-    let step = |v: f32, n: u32| index_of(f32::from_bits(v.to_bits().wrapping_sub(n)));
-    (step(x0, nudge[0]), step(y0, nudge[1]), step(x1, nudge[2]), step(y1, nudge[3]))
+fn span(v0: f32, v1: f32, back: u32) -> (i32, i32, i32) {
+    if back != 0 {
+        let start = ceil_index(v0) - 1;
+        (start, index_of(v1), start)
+    } else {
+        let start = index_of(v0);
+        (start, ceil_index(v1) - 1, start + 1)
+    }
+}
+
+/// `ceil(value)` as an integer, for a coordinate inside the raster, as `index_of` truncates one.
+#[inline(always)]
+fn ceil_index(value: f32) -> i32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let i: i32;
+        // SAFETY: reads one float register and writes one address register, nothing else.
+        unsafe {
+            core::arch::asm!("ceil.s {0}, {1}, 0", out(reg) i, in(freg) value, options(pure, nomem, nostack))
+        };
+        i
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        index_of(crate::platform::ceil(value))
+    }
 }
 
 /// The fractional part of a coordinate inside the raster, through the same unchecked convert.

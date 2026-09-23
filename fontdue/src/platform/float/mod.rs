@@ -64,3 +64,46 @@ pub fn mul_add(a: f32, b: f32, c: f32) -> f32 {
 pub fn mul_add(a: f32, b: f32, c: f32) -> f32 {
     a * b + c
 }
+
+/// `value / 2`, exactly. On Xtensa the conversion's scale does the halving.
+#[inline(always)]
+pub fn half_of(value: i32) -> f32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let r: f32;
+        // SAFETY: register-only conversion.
+        unsafe {
+            core::arch::asm!("float.s {r}, {v}, 1", r = out(freg) r, v = in(reg) value, options(pure, nomem, nostack));
+        }
+        r
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        value as f32 * 0.5
+    }
+}
+
+/// `value / 2`, exactly for a normal result. On Xtensa `const.s` loads the 0.5 without a literal
+/// load.
+#[inline(always)]
+pub fn halve(value: f32) -> f32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let r: f32;
+        // SAFETY: register-only float arithmetic.
+        unsafe {
+            core::arch::asm!(
+                "const.s {r}, 3",
+                "mul.s {r}, {v}, {r}",
+                r = out(freg) r,
+                v = in(freg) value,
+                options(pure, nomem, nostack)
+            );
+        }
+        r
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        value * 0.5
+    }
+}

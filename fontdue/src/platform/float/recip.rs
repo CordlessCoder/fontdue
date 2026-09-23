@@ -1,39 +1,45 @@
-/// `1.0 / x`. On Xtensa it is the `recip0.s` estimate refined by two fused Newton steps, measured
-/// within 1 ulp of the division for every normal `x`. There the division is a ROM call that spills
-/// every live float register around it, and a guarded fallback to it costs the loop around it the
-/// same, taken or not. For zero, subnormal and infinite `x` the estimate's result does not match
-/// the division's class, so callers keep `x` normal. Everywhere else it divides.
+/// `(1.0 / a, 1.0 / b)`. On Xtensa each is the `recip0.s` estimate refined by two fused Newton
+/// steps, `e = 1 - x·r` then `r + r·e`, measured within 1 ulp of the division for every normal
+/// `x`. There the division is a ROM call that spills every live float register around it. For
+/// zero, subnormal and infinite `x` the estimate's result does not match the division's class, so
+/// callers keep both normal. The two chains are interleaved in one block: every step waits four
+/// cycles on the one before it, and the other chain's step fills the wait. Everywhere else it
+/// divides.
 #[inline(always)]
-pub fn recip(x: f32) -> f32 {
+pub fn recip2(a: f32, b: f32) -> (f32, f32) {
     #[cfg(target_arch = "xtensa")]
     {
-        let mut r: f32;
+        let (ra, rb): (f32, f32);
         // SAFETY: register-only float arithmetic.
         unsafe {
-            core::arch::asm!("recip0.s {r}, {x}", r = out(freg) r, x = in(freg) x, options(pure, nomem, nostack));
+            core::arch::asm!(
+                "recip0.s {ra}, {a}",
+                "recip0.s {rb}, {b}",
+                "const.s {ea}, 1",
+                "const.s {eb}, 1",
+                "msub.s {ea}, {a}, {ra}",
+                "msub.s {eb}, {b}, {rb}",
+                "madd.s {ra}, {ra}, {ea}",
+                "madd.s {rb}, {rb}, {eb}",
+                "const.s {ea}, 1",
+                "const.s {eb}, 1",
+                "msub.s {ea}, {a}, {ra}",
+                "msub.s {eb}, {b}, {rb}",
+                "madd.s {ra}, {ra}, {ea}",
+                "madd.s {rb}, {rb}, {eb}",
+                ra = out(freg) ra,
+                rb = out(freg) rb,
+                ea = out(freg) _,
+                eb = out(freg) _,
+                a = in(freg) a,
+                b = in(freg) b,
+                options(pure, nomem, nostack)
+            );
         }
-        // Written out rather than looped: at `opt-level = "s"` a two-trip loop is not unrolled,
-        // and its counter lands in the dependent chain.
-        r = step(x, r);
-        r = step(x, r);
-        r
+        (ra, rb)
     }
     #[cfg(not(target_arch = "xtensa"))]
     {
-        1.0 / x
+        (1.0 / a, 1.0 / b)
     }
-}
-
-/// One Newton step for `1 / x`: `e = 1 - x·r`, then `r + r·e`, both fused.
-#[cfg(target_arch = "xtensa")]
-#[inline(always)]
-fn step(x: f32, r: f32) -> f32 {
-    let mut e: f32 = 1.0;
-    let mut r = r;
-    // SAFETY: register-only float arithmetic.
-    unsafe {
-        core::arch::asm!("msub.s {e}, {x}, {r}", e = inout(freg) e, x = in(freg) x, r = in(freg) r, options(pure, nomem, nostack));
-        core::arch::asm!("madd.s {r}, {r}, {e}", r = inout(freg) r, e = in(freg) e, options(pure, nomem, nostack));
-    }
-    r
 }

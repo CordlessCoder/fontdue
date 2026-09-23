@@ -6,9 +6,9 @@
 
 use crate::FontRepr;
 use crate::font::MAX_DIMENSION;
-use crate::math::{Line, Point};
+use crate::math::Point;
 use crate::outline::{GlyphRef, OutlineInfo, PathEvent, PathSource};
-use crate::platform::{abs, as_i32_unchecked, ceil, floor, sqrt};
+use crate::platform::{as_i32_unchecked, ceil, floor, sqrt};
 use crate::raster::{BitmapIter, Raster, Sink};
 use core::mem::MaybeUninit;
 
@@ -164,12 +164,17 @@ impl Outline for &GlyphRef<'_> {
     }
 }
 
-/// `v` clamped into `[0, hi]`, for a finite `hi >= 0`. Non-negative floats order as their bits
-/// do as integers and negative ones as negative integers, so this is an integer max and min. A
-/// NaN lands at 0 or `hi` by its sign.
+/// The least coordinate `clamp` gives, 2^-100, unless `hi` is below it. Distinct floats at least
+/// this large differ by at least 2^-123, so every delta between clamped points is zero or normal,
+/// as the unguarded line walk needs.
+const LEAST: i32 = (127 - 100) << 23;
+
+/// `v` clamped into `[2^-100, hi]`, or to `hi` when `hi` is smaller, for a finite `hi >= 0`.
+/// Non-negative floats order as their bits do as integers and negative ones as negative
+/// integers, so this is an integer max and min. A NaN lands at an end by its sign.
 #[inline(always)]
 fn clamp(v: f32, hi: f32) -> f32 {
-    f32::from_bits((v.to_bits() as i32).max(0).min(hi.to_bits() as i32) as u32)
+    f32::from_bits((v.to_bits() as i32).max(LEAST).min(hi.to_bits() as i32) as u32)
 }
 
 /// Splits a pen coordinate into its whole-pixel part, as an `i32`, and its fraction.
@@ -267,7 +272,6 @@ fn rasterize_with(
         height,
     };
     canvas.resize(width, height);
-    let mut sink = Sink::new(canvas, 1.0, 1.0, 0.0, 0.0);
     let first = count.saturating_sub(RING);
     // Before the first `MoveTo` the previous point is the raster's corner, which is inside it.
     let mut last = Point::new(0.0, 0.0);
@@ -281,6 +285,10 @@ fn rasterize_with(
             cy: map.cy - oy,
             ..map
         };
+        // Its own sink and previous point: the visit can reach a `dyn` source, which keeps what
+        // the closure captures in memory, and the ring loop would then read them from there.
+        let mut sink = Sink::new(canvas, 1.0, 1.0, 0.0, 0.0);
+        let mut previous = last;
         draw.each_first(first, |event| {
             let ([x, y], start) = match event {
                 PathEvent::MoveTo(p) => (p, true),
@@ -289,17 +297,19 @@ fn rasterize_with(
             let (qx, qy) = map.apply(x, y);
             let p = Point::new(clamp(qx, w), clamp(qy, h));
             if !start {
-                sink.placed(last, p);
+                sink.edge(previous, p);
             }
-            last = p;
+            previous = p;
         });
+        last = previous;
     }
+    let mut sink = Sink::new(canvas, 1.0, 1.0, 0.0, 0.0);
     for k in first..count {
         // SAFETY: the measuring pass wrote slot `k % RING` for every `k` in `first..count`.
         let ([qx, qy], start) = unsafe { ring[k % RING].assume_init() };
         let p = Point::new(clamp(qx - ox, w), clamp(qy - oy, h));
         if !start {
-            sink.placed(last, p);
+            sink.edge(last, p);
         }
         last = p;
     }
@@ -320,7 +330,14 @@ pub fn rasterize_transformed(
     transform: Transform,
     pen: (f32, f32),
 ) -> TransformedMetrics {
-    rasterize_with(canvas, &glyph.info(), scale, transform, pen, glyph, glyph)
+    // Stored points go through an iterator, not `visit`: its closure also serves `dyn` sources,
+    // which kept it out of line, called once per point.
+    match glyph.path() {
+        Some(events) => {
+            rasterize_with(canvas, &glyph.info(), scale, transform, pen, Iter(events.clone()), Iter(events))
+        }
+        None => rasterize_with(canvas, &glyph.info(), scale, transform, pen, glyph, glyph),
+    }
 }
 
 /// [`rasterize_transformed`] for one glyph of `source`, monomorphized over it.
@@ -356,21 +373,6 @@ pub fn rasterize_source_transformed_indexed<'r, S: PathSource + ?Sized>(
     }
     let metrics = rasterize_source_transformed(canvas, source, glyph, scale, transform, pen);
     (metrics, canvas.get_bitmap_iter())
-}
-
-/// A transformed segment's line, or `None` when it has no vertical extent. A delta too small to
-/// be a normal float counts as zero, since the reciprocal is only accurate for normal values.
-#[inline(always)]
-pub(crate) fn placed_line(start: Point, end: Point) -> Option<Line> {
-    if !(abs(end.y - start.y) >= f32::MIN_POSITIVE) {
-        return None;
-    }
-    let end = if abs(end.x - start.x) >= f32::MIN_POSITIVE {
-        end
-    } else {
-        Point::new(start.x, end.y)
-    };
-    Some(Line::at_draw(start, end))
 }
 
 /// Glyph indices and unrounded pen offsets along the baseline for one line of text, with
@@ -451,11 +453,12 @@ pub fn transformed_raster_capacity<F: FontRepr + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::clamp;
+    use super::{LEAST, clamp};
 
     /// The integer clamp against the float comparison it replaces, NaN included.
     #[test]
     fn clamp_matches_float_comparison() {
+        let least = f32::from_bits(LEAST as u32);
         let values = [
             0.0,
             -0.0,
@@ -474,17 +477,12 @@ mod tests {
         ];
         for hi in [0.0f32, 1.0, 7.0, 1e30] {
             for v in values {
-                let want = if v >= 0.0 {
-                    v.min(hi)
-                } else {
-                    0.0
-                };
-                // As floats: the clamp gives +0.0 for -0.0, the same coordinate.
-                assert_eq!(clamp(v, hi), want, "{v} into [0, {hi}]");
+                let want = v.max(least).min(hi);
+                assert_eq!(clamp(v, hi).to_bits(), want.to_bits(), "{v} into [2^-100, {hi}]");
             }
             for nan in [f32::NAN, -f32::NAN] {
                 let got = clamp(nan, hi);
-                assert!(got == 0.0 || got == hi, "{nan} into [0, {hi}] gave {got}");
+                assert!(got == least.min(hi) || got == hi, "{nan} into [2^-100, {hi}] gave {got}");
             }
         }
     }

@@ -1,10 +1,10 @@
 //! The compressed line store: a format for baked glyph outlines, a streaming decoder that needs
 //! neither `std` nor `alloc`, and its encoder, which the macro runs.
 //!
-//! The decoder yields a glyph's line segments as `[x0, y0, x1, y1]` in units of
-//! [`Store::unit`] font units, relative to the glyph's bounding box with y growing down, which is
-//! the frame fontdue's `Line`s use. The unit is a power of two, so a consumer folds it into its
-//! draw scale exactly. It holds no buffer: each segment is decoded from flash as it is requested.
+//! The decoder yields a glyph's contours as points in units of [`Store::unit`] font units,
+//! relative to the glyph's bounding box with y growing down, the frame every glyph source uses.
+//! The unit is a power of two, so a consumer folds it into its draw scale exactly. It holds no
+//! buffer: each point is decoded from flash as it is requested.
 //!
 //! # Format (version 5)
 //!

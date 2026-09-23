@@ -1,5 +1,5 @@
 pub use crate::platform::f32x4;
-use crate::platform::{self, abs, atan2, recip, sqrt};
+use crate::platform::{self, abs, atan2, sqrt};
 use crate::{Glyph, OutlineBounds};
 use alloc::vec;
 use alloc::vec::*;
@@ -230,94 +230,6 @@ impl Point {
             x: (self.x + other.x) / 2.0,
             y: (self.y + other.y) / 2.0,
         }
-    }
-}
-
-/// A segment as the line walk takes it: its coordinates and reciprocal deltas.
-#[derive(Copy, Clone)]
-pub(crate) struct Line {
-    /// X0, Y0, X1, Y1.
-    pub(crate) coords: f32x4,
-    /// Reciprocal X and Y deltas. The line walk's crossing order depends on them, so a line
-    /// whose reciprocals do not match its coordinates can step past its end cell.
-    pub(crate) params: [f32; 2],
-}
-
-#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
-const _: () = assert!(core::mem::size_of::<Line>() == 32);
-#[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
-const _: () = assert!(core::mem::size_of::<Line>() == 24);
-
-impl Line {
-    #[cfg(test)]
-    pub(crate) fn new(start: Point, end: Point) -> Line {
-        let dx = end.x - start.x;
-        let dy = end.y - start.y;
-        Line {
-            coords: f32x4::new(start.x, start.y, end.x, end.y),
-            params: [
-                if dx == 0.0 {
-                    core::f32::MAX
-                } else {
-                    1.0 / dx
-                },
-                if dy == 0.0 {
-                    core::f32::MAX
-                } else {
-                    1.0 / dy
-                },
-            ],
-        }
-    }
-
-    /// As `new`, with the reciprocals from `platform::recip`, for lines built at draw time. On
-    /// Xtensa they can differ from `new`'s by 1 ulp.
-    #[inline(always)]
-    pub(crate) fn at_draw(start: Point, end: Point) -> Line {
-        let dx = end.x - start.x;
-        let dy = end.y - start.y;
-        Line {
-            coords: f32x4::new(start.x, start.y, end.x, end.y),
-            params: [
-                if dx == 0.0 {
-                    core::f32::MAX
-                } else {
-                    recip(dx)
-                },
-                recip(dy),
-            ],
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn raster_parts(&self) -> ([u32; 4], [i32; 2], f32x4) {
-        let (x0, y0, x1, y1) = self.coords.copied();
-        let [tdx, tdy] = self.params;
-        let (x_start_nudge, x_first_adj) = if x1 >= x0 {
-            (0, 1)
-        } else {
-            (1, 0)
-        };
-        let (y_start_nudge, y_first_adj) = if y1 >= y0 {
-            (0, 1)
-        } else {
-            (1, 0)
-        };
-        let x_end_nudge = if x1 > x0 {
-            1
-        } else {
-            0
-        };
-        let y_end_nudge = if y1 > y0 {
-            1
-        } else {
-            0
-        };
-        (
-            [x_start_nudge, y_start_nudge, x_end_nudge, y_end_nudge],
-            [x_first_adj, y_first_adj],
-            f32x4::new(tdx, tdy, x1 - x0, y1 - y0),
-        )
     }
 }
 
@@ -565,18 +477,5 @@ mod tests {
         let mut point_glyph = Glyph::default();
         point.finalize(&mut point_glyph);
         assert!(point_glyph.points.is_empty() && point_glyph.contours.is_empty());
-    }
-
-    #[test]
-    fn vertical_line_raster_parts_handle_zero_width() {
-        let line = Line::new(Point::new(1.0, 0.0), Point::new(1.0, 2.0));
-        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd"))]
-        assert_eq!(core::mem::size_of::<Line>(), 32);
-        #[cfg(not(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "simd")))]
-        assert_eq!(core::mem::size_of::<Line>(), 24);
-        let (nudge, adjustment, params) = line.raster_parts();
-        assert_eq!(nudge, [0, 0, 0, 1]);
-        assert_eq!(adjustment, [1, 1]);
-        assert_eq!(params.copied(), (f32::MAX, 0.5, 0.0, 2.0));
     }
 }

@@ -157,6 +157,54 @@ pub(crate) fn each_contour<'p>(
     }
 }
 
+/// The events of stored contours, as a [`PathSource`] yields them. An end past the points or
+/// before the previous one ends the walk, as in [`each_contour`].
+#[derive(Clone)]
+pub(crate) struct PathEvents<'p> {
+    points: &'p [[f32; 2]],
+    contours: core::slice::Iter<'p, u32>,
+    next: usize,
+    end: usize,
+}
+
+impl<'p> PathEvents<'p> {
+    #[inline(always)]
+    pub(crate) fn new(points: &'p [[f32; 2]], contours: &'p [u32]) -> Self {
+        PathEvents {
+            points,
+            contours: contours.iter(),
+            next: 0,
+            end: 0,
+        }
+    }
+}
+
+impl Iterator for PathEvents<'_> {
+    type Item = PathEvent;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<PathEvent> {
+        if self.next < self.end {
+            let point = self.points[self.next];
+            self.next += 1;
+            return Some(PathEvent::LineTo(point));
+        }
+        loop {
+            let end = *self.contours.next()? as usize;
+            if end > self.points.len() || end < self.next {
+                self.contours = [].iter();
+                return None;
+            }
+            if end > self.next {
+                let point = self.points[self.next];
+                self.next += 1;
+                self.end = end;
+                return Some(PathEvent::MoveTo(point));
+            }
+        }
+    }
+}
+
 /// A glyph ready to measure or draw: stored points, or one glyph of an [`OutlineSource`].
 #[derive(Clone, Copy)]
 pub struct GlyphRef<'a> {
@@ -188,6 +236,15 @@ impl<'a> GlyphRef<'a> {
     #[inline(always)]
     pub fn info(&self) -> OutlineInfo {
         self.info
+    }
+
+    /// The stored contours, when the glyph is not a source's.
+    #[inline(always)]
+    pub(crate) fn path(&self) -> Option<PathEvents<'a>> {
+        match self.outline {
+            Outline::Path(points, contours) => Some(PathEvents::new(points, contours)),
+            Outline::Source(..) => None,
+        }
     }
 
     #[inline(always)]

@@ -100,3 +100,26 @@ mod tests {
         }
     }
 }
+
+/// `floor(x)` as an `i32`, without `floor`'s guard.
+///
+/// # Safety
+///
+/// `x` must be finite and its floor must fit `i32`.
+#[inline(always)]
+pub unsafe fn floor_i32_unchecked(x: f32) -> i32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let i: i32;
+        // SAFETY: reads one float register and writes one address register, nothing else.
+        unsafe {
+            core::arch::asm!("floor.s {0}, {1}, 0", out(reg) i, in(freg) x, options(pure, nomem, nostack))
+        };
+        i
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        // SAFETY: the caller's bound.
+        unsafe { floor(x).to_int_unchecked() }
+    }
+}

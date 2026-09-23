@@ -99,3 +99,26 @@ mod tests {
         }
     }
 }
+
+/// `ceil(x)` as an `i32`, without `ceil`'s guard.
+///
+/// # Safety
+///
+/// `x` must be finite and its ceil must fit `i32`.
+#[inline(always)]
+pub unsafe fn ceil_i32_unchecked(x: f32) -> i32 {
+    #[cfg(target_arch = "xtensa")]
+    {
+        let i: i32;
+        // SAFETY: reads one float register and writes one address register, nothing else.
+        unsafe {
+            core::arch::asm!("ceil.s {0}, {1}, 0", out(reg) i, in(freg) x, options(pure, nomem, nostack))
+        };
+        i
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        // SAFETY: the caller's bound.
+        unsafe { ceil(x).to_int_unchecked() }
+    }
+}

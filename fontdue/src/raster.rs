@@ -686,19 +686,7 @@ fn span(v0: f32, v1: f32, back: u32) -> (i32, i32, i32) {
 /// `ceil(value)` as an integer, for a coordinate inside the raster, as `index_of` truncates one.
 #[inline(always)]
 fn ceil_index(value: f32) -> i32 {
-    #[cfg(target_arch = "xtensa")]
-    {
-        let i: i32;
-        // SAFETY: reads one float register and writes one address register, nothing else.
-        unsafe {
-            core::arch::asm!("ceil.s {0}, {1}, 0", out(reg) i, in(freg) value, options(pure, nomem, nostack))
-        };
-        i
-    }
-    #[cfg(not(target_arch = "xtensa"))]
-    {
-        index_of(crate::platform::ceil(value))
-    }
+    unsafe { crate::platform::ceil_i32_unchecked(value) }
 }
 
 /// The fractional part of a coordinate inside the raster, through the same unchecked convert.

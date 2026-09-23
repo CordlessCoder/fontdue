@@ -2,7 +2,9 @@ use crate::FontResult;
 pub use crate::fontrepr::FontRepr;
 use crate::math::Geometry;
 use crate::outline::{GlyphRef, OutlineInfo, PathSource};
-use crate::platform::{as_i32, as_i32_unchecked, ceil, floor, fract, is_negative};
+use crate::platform::{
+    abs, as_i32_unchecked, ceil, ceil_i32_unchecked, floor, floor_i32_unchecked, fract, is_negative,
+};
 use crate::raster::{Raster, Sink};
 use crate::table::{TableKern, load_gsub};
 use crate::unicode;
@@ -299,6 +301,59 @@ pub fn metrics_raw(scale: f32, glyph: &GlyphRef<'_>, offset: f32) -> (Metrics, f
 #[inline(always)]
 fn metrics_raw_stretched(scale: f32, glyph: &OutlineInfo, offset: f32, stretch: f32) -> (Metrics, f32, f32) {
     let bounds = glyph.bounds.scale(scale * glyph.unit);
+    // Below 2^22 every value converted here is under 2^23, where a float has a fraction and its
+    // conversions fit `i32`, so one check replaces the guard in each of eight conversions. NaN
+    // fails it. Past it, `outside` does the same arithmetic with the guarded forms.
+    const FAST: f32 = 4194304.0;
+    let fast = abs(bounds.xmin) < FAST
+        && abs(bounds.ymin) < FAST
+        && abs(bounds.width) < FAST
+        && abs(bounds.height) < FAST
+        && abs(offset) < FAST;
+    let ([xmin, ymin, width, height], offset_x, offset_y) = if fast {
+        // SAFETY: every argument is under 2^23 in magnitude, by the check above.
+        let fract = |v: f32| v - unsafe { as_i32_unchecked(v) } as f32;
+        let mut offset_x = fract(bounds.xmin + offset);
+        let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
+        // Unlike the guarded `fract`, this one gives -0 for -0; either way no offset is added.
+        if offset_x < 0.0 {
+            offset_x += 1.0;
+        }
+        if offset_y < 0.0 {
+            offset_y += 1.0;
+        }
+        // SAFETY: as above; the offsets are in [0, 1).
+        let (xmin, ymin, width, height) = unsafe {
+            (
+                floor_i32_unchecked(bounds.xmin),
+                floor_i32_unchecked(bounds.ymin),
+                ceil_i32_unchecked(bounds.width + offset_x),
+                ceil_i32_unchecked(bounds.height + offset_y),
+            )
+        };
+        // The guarded path's range check, reduced to what can fail below 2^23.
+        if !(width >= 0 && height >= 0 && (0.0..=MAX_DIMENSION).contains(&(width as f32 * stretch))) {
+            out_of_range(scale);
+        }
+        ([xmin, ymin, width, height], offset_x, offset_y)
+    } else {
+        outside(scale, &bounds, offset, stretch)
+    };
+    let metrics = Metrics {
+        xmin,
+        ymin,
+        width: width as usize,
+        height: height as usize,
+        advance_width: scale * glyph.advance_width,
+        advance_height: scale * glyph.advance_height,
+        bounds,
+    };
+    (metrics, offset_x, offset_y)
+}
+
+/// `metrics_raw_stretched` for bounds or an offset of 2^22 or more, or NaN.
+#[cold]
+fn outside(scale: f32, bounds: &OutlineBounds, offset: f32, stretch: f32) -> ([i32; 4], f32, f32) {
     let mut offset_x = fract(bounds.xmin + offset);
     let mut offset_y = fract(1.0 - fract(bounds.height) - fract(bounds.ymin));
     if is_negative(offset_x) {
@@ -311,31 +366,30 @@ fn metrics_raw_stretched(scale: f32, glyph: &OutlineInfo, offset: f32, stretch: 
     let ymin = floor(bounds.ymin);
     let width = ceil(bounds.width + offset_x);
     let height = ceil(bounds.height + offset_y);
-    let stretched_width = width * stretch;
     // Every later stage trusts these dimensions: `resize` sizes the buffer from them and `add`
     // indexes it with `get_unchecked_mut`. A px large enough to saturate the width while the
     // height truncates to zero would size the buffer at three floats and then write past it. The
     // range check rejects that, and rejects NaN, infinite and negative px with it, because none
     // of those compare inside the range. It is also what makes the conversions below sound.
-    assert!(
-        (-MAX_DIMENSION..=MAX_DIMENSION).contains(&xmin)
-            && (-MAX_DIMENSION..=MAX_DIMENSION).contains(&ymin)
-            && (0.0..=MAX_DIMENSION).contains(&width)
-            && (0.0..=MAX_DIMENSION).contains(&height)
-            && (0.0..=MAX_DIMENSION).contains(&stretched_width),
-        "px out of range: this glyph at scale {scale} does not fit i32"
-    );
-    let metrics = Metrics {
-        // SAFETY: the range check above bounds all four inside `i32` and rejects NaN.
-        xmin: unsafe { as_i32_unchecked(xmin) },
-        ymin: unsafe { as_i32_unchecked(ymin) },
-        width: unsafe { as_i32_unchecked(width) } as usize,
-        height: unsafe { as_i32_unchecked(height) } as usize,
-        advance_width: scale * glyph.advance_width,
-        advance_height: scale * glyph.advance_height,
-        bounds,
+    if !((-MAX_DIMENSION..=MAX_DIMENSION).contains(&xmin)
+        && (-MAX_DIMENSION..=MAX_DIMENSION).contains(&ymin)
+        && (0.0..=MAX_DIMENSION).contains(&width)
+        && (0.0..=MAX_DIMENSION).contains(&height)
+        && (0.0..=MAX_DIMENSION).contains(&(width * stretch)))
+    {
+        out_of_range(scale);
+    }
+    // SAFETY: the range check above bounds all four inside `i32` and rejects NaN.
+    let dimensions = unsafe {
+        [as_i32_unchecked(xmin), as_i32_unchecked(ymin), as_i32_unchecked(width), as_i32_unchecked(height)]
     };
-    (metrics, offset_x, offset_y)
+    (dimensions, offset_x, offset_y)
+}
+
+#[cold]
+#[inline(never)]
+fn out_of_range(scale: f32) -> ! {
+    panic!("px out of range: this glyph at scale {scale} does not fit i32")
 }
 
 #[inline(always)]
@@ -393,7 +447,8 @@ fn rasterize_with(
     // into the column it lands inside, and a truncated width hands `add` a row shorter than it
     // fills. Only 1.0 and 3.0 reach this today and both are exact, so nothing here is load-bearing
     // for the shipped paths; it stops the general form from being wrong.
-    let raster_width = as_i32(ceil(metrics.width as f32 * stretch)) as usize;
+    // SAFETY: `metrics_raw_stretched` checked this product is in [0, MAX_DIMENSION].
+    let raster_width = unsafe { ceil_i32_unchecked(metrics.width as f32 * stretch) } as usize;
     canvas.resize(raster_width, metrics.height);
     let scale = scale * info.unit;
     draw(&mut Sink::new(canvas, scale * stretch, scale, offset_x * stretch, offset_y));
@@ -569,5 +624,54 @@ impl FontRepr for Font {
     #[inline(always)]
     fn get_glyph_at_index(&self, index: u16) -> GlyphRef<'_> {
         GlyphRef::from_glyph(&self.glyphs[index as usize])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The checked-once path against the guarded one, over values that pass both.
+    #[test]
+    fn metrics_fast_path_matches_guarded() {
+        let values = [
+            -0.0, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 7.75, 12.0, 33.3, 1000.0, 4194303.5, -0.25, -1.0, -1.5,
+            -7.75, -33.3, -4194303.5,
+        ];
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            values[(seed >> 8) as usize % values.len()]
+        };
+        for _ in 0..20000 {
+            let info = OutlineInfo {
+                bounds: OutlineBounds {
+                    xmin: next(),
+                    ymin: next(),
+                    width: abs(next()),
+                    height: abs(next()),
+                },
+                unit: 1.0,
+                advance_width: 0.0,
+                advance_height: 0.0,
+            };
+            // Never -0: with -0 bounds too, the SIMD `fract` gives -0, which the guarded path
+            // then counts as negative, adding a whole column. Callers pass +0.
+            let offset = next() / 8.0 + 0.0;
+            let stretch = if next() < 0.0 {
+                3.0
+            } else {
+                1.0
+            };
+            let (metrics, ox, oy) = metrics_raw_stretched(1.0, &info, offset, stretch);
+            let (dimensions, gx, gy) = outside(1.0, &info.bounds, offset, stretch);
+            assert_eq!(
+                [metrics.xmin, metrics.ymin, metrics.width as i32, metrics.height as i32],
+                dimensions,
+                "{info:?} offset {offset}"
+            );
+            // As floats: the two differ only in the sign of a zero offset.
+            assert!(ox == gx && oy == gy, "{info:?} offset {offset}: {ox} {oy} against {gx} {gy}");
+        }
     }
 }

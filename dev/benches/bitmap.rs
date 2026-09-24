@@ -50,6 +50,36 @@ fn setup(c: &mut Criterion) {
                 sum
             })
         });
+
+        // A rotated raster, whose corners are empty row ends.
+        let turn = fontdue::Transform::rotation(0.70710677, 0.70710677);
+        group.bench_function(BenchmarkId::from_parameter(format!("fold 45deg {}px", size)), |b| {
+            b.iter(|| {
+                let mut canvas = Raster::empty();
+                let mut sum = 0u64;
+                for character in MESSAGE.chars() {
+                    let (_, bitmap) =
+                        font.rasterize_transformed(&mut canvas, character, size, turn, (0.3, 0.7));
+                    sum += bitmap.fold(0u64, |a, b| a + b as u64);
+                }
+                sum
+            })
+        });
+
+        // The same through `rows`, which hands over only each row's covered span.
+        group.bench_function(BenchmarkId::from_parameter(format!("rows 45deg {}px", size)), |b| {
+            let mut row = vec![0u8; 1024];
+            b.iter(|| {
+                let mut canvas = Raster::empty();
+                let mut sum = 0u64;
+                for character in MESSAGE.chars() {
+                    let (_, bitmap) =
+                        font.rasterize_transformed(&mut canvas, character, size, turn, (0.3, 0.7));
+                    bitmap.rows(&mut row, |_, _, bytes| sum += bytes.iter().map(|&c| c as u64).sum::<u64>());
+                }
+                sum
+            })
+        });
     }
     group.finish();
 }

@@ -191,6 +191,42 @@ fn coverage_is_the_same_at_every_angle() {
     }
 }
 
+/// `fold` and `rows` have their own loops apart from `next`'s, and `rows` leaves each row's
+/// empty ends uncomputed.
+#[test]
+fn fold_and_rows_match_next_on_glyphs() {
+    let fold = |bitmap: fontdue::raster::BitmapIter| {
+        bitmap.fold(Vec::new(), |mut v, c| {
+            v.push(c);
+            v
+        })
+    };
+    let rows = |bitmap: fontdue::raster::BitmapIter, width: usize| {
+        let mut image = vec![0; bitmap.len()];
+        bitmap.rows(&mut vec![0; width], |y, x, bytes| {
+            image[y * width + x..][..bytes.len()].copy_from_slice(bytes)
+        });
+        image
+    };
+    for (name, font) in dev_fonts() {
+        let mut canvas = Raster::empty();
+        for index in (0..font.glyph_count()).step_by(7) {
+            let (m, bitmap) = font.rasterize_indexed(&mut canvas, index, 24.0);
+            let want: Vec<u8> = bitmap.clone().collect();
+            assert_eq!(fold(bitmap.clone()), want, "{name} glyph {index} upright");
+            assert_eq!(rows(bitmap, m.width), want, "{name} glyph {index} upright, rows");
+            for degrees in [15, 45, 100, 290] {
+                let r = (degrees as f32).to_radians();
+                let t = Transform::rotation(r.cos(), r.sin());
+                let (m, bitmap) = font.rasterize_indexed_transformed(&mut canvas, index, 24.0, t, (0.3, 0.7));
+                let want: Vec<u8> = bitmap.clone().collect();
+                assert_eq!(fold(bitmap.clone()), want, "{name} glyph {index} at {degrees}°");
+                assert_eq!(rows(bitmap, m.width as usize), want, "{name} glyph {index} at {degrees}°, rows");
+            }
+        }
+    }
+}
+
 /// Relative difference in total coverage allowed between a rotated glyph and the upright one.
 /// Measured worst: 0.0018, '1' at 225°. Leaving out horizontal edges gives 0.15 at 1°.
 const COVERAGE_BOUND: f64 = 0.005;

@@ -144,6 +144,7 @@ impl<'a> Raster<'a> {
             height: 0.0,
             block: 0,
             block_left: 0,
+            width: self.w,
             _rule: PhantomData,
         }
     }
@@ -822,6 +823,8 @@ pub struct BitmapIter<'r, R: FillRule = NonZero> {
     block: u32,
     /// Bytes of `block` not yet yielded.
     block_left: usize,
+    /// The raster's width, where `fold` looks for runs of empty deltas.
+    width: usize,
     _rule: PhantomData<R>,
 }
 
@@ -968,6 +971,91 @@ impl<R: FillRule> BitmapIter<'_, R> {
         self.pos += BLOCK;
         self.block_left = BLOCK;
     }
+
+    /// The coverage not yet yielded, a row at a time, for callers that blend spans rather than
+    /// single pixels. For each row with covered pixels, calls `f(y, x, bytes)` with the row's
+    /// pixels from column `x` on, written into `row`. Every pixel outside `bytes` is zero, and
+    /// was not computed: a rotated glyph's raster is mostly such row ends.
+    ///
+    /// # Panics
+    ///
+    /// If pixels remain and `row` is shorter than the raster's width.
+    pub fn rows(mut self, row: &mut [u8], mut f: impl FnMut(usize, usize, &[u8])) {
+        if self.remaining == 0 {
+            return;
+        }
+        let w = self.width;
+        let row = &mut row[..w];
+        let a = self.a;
+        let start = self.pos - self.block_left;
+        let end = start + self.remaining;
+        let (mut y, mut at) = (start / w, start % w);
+        // Where this row's bytes begin. Bytes `next` has computed are written as they are, and
+        // the row's span then starts at them.
+        let mut span = at;
+        while self.block_left > 0 && self.remaining > 0 {
+            row[at] = self.block as u8;
+            self.block >>= 8;
+            self.block_left -= 1;
+            self.remaining -= 1;
+            at += 1;
+            if at == w {
+                f(y, span, &row[span..]);
+                (y, at, span) = (y + 1, 0, 0);
+            }
+        }
+        if self.remaining == 0 {
+            if at > span {
+                f(y, span, &row[span..at]);
+            }
+            return;
+        }
+        let mut p = self.pos;
+        while p < end {
+            let row_end = (p - at + w).min(end);
+            let cells = &a[p..row_end];
+            let last = p + cells.iter().rposition(|d| d.to_bits() != 0).map_or(0, |last| last + 1);
+            // Zero deltas leave the total alone, so a row's leading zeros share one coverage byte,
+            // and so do its trailing zeros. Where that byte is zero, they are left out of the span.
+            let empty = R::step(&mut { self.height }, 0.0);
+            let lead = match empty {
+                0 => cells.iter().position(|d| d.to_bits() != 0).unwrap_or(cells.len()),
+                _ => 0,
+            };
+            if at > span {
+                row[at..at + lead].fill(empty);
+            } else {
+                span = at + lead;
+            }
+            at += lead;
+            p += lead;
+            // Whole blocks may run past `last` into the row's trailing zeros, which come out as
+            // their shared byte. Cells short of a block before the row's end are stepped singly.
+            let blocks = last.saturating_sub(p).div_ceil(BLOCK).min((row_end - p) / BLOCK);
+            let deltas = a[p..p + blocks * BLOCK].chunks_exact(BLOCK);
+            for (chunk, out) in deltas.zip(row[at..at + blocks * BLOCK].chunks_exact_mut(BLOCK)) {
+                let [c0, c1, c2, c3] = R::block(&mut self.height, chunk.try_into().unwrap());
+                out.copy_from_slice(&[c0 as u8, c1 as u8, c2 as u8, c3 as u8]);
+            }
+            at += blocks * BLOCK;
+            p += blocks * BLOCK;
+            while p < last {
+                row[at] = R::step(&mut self.height, a[p]);
+                at += 1;
+                p += 1;
+            }
+            let tail = R::step(&mut { self.height }, 0.0);
+            if tail != 0 && p < row_end {
+                row[at..at + (row_end - p)].fill(tail);
+                at += row_end - p;
+            }
+            if at > span {
+                f(y, span, &row[span..at]);
+            }
+            p = row_end;
+            (y, at, span) = (y + 1, 0, 0);
+        }
+    }
 }
 
 impl<R: FillRule> Iterator for BitmapIter<'_, R> {
@@ -1032,7 +1120,7 @@ impl<R: FillRule> ExactSizeIterator for BitmapIter<'_, R> {
 mod tests {
     use super::*;
 
-    fn iter<R: FillRule>(a: &[f32], len: usize) -> BitmapIter<'_, R> {
+    fn iter<R: FillRule>(a: &[f32], len: usize, width: usize) -> BitmapIter<'_, R> {
         BitmapIter {
             a,
             pos: 0,
@@ -1040,6 +1128,7 @@ mod tests {
             height: 0.0,
             block: 0,
             block_left: 0,
+            width,
             _rule: PhantomData,
         }
     }
@@ -1064,8 +1153,8 @@ mod tests {
     }
 
     /// `fold` has its own blocking and remainder, separate from `next`'s, and must yield the same
-    /// bytes: for every length mod 4, after `next` has taken part of a block, and for totals that
-    /// overshoot the clamp or go NaN.
+    /// bytes: for every length mod 4, after `next` has taken part of a block, with runs of zeros,
+    /// and for totals that overshoot the clamp or go NaN.
     #[test]
     fn fold_matches_next() {
         let deltas: Vec<f32> = (0..40)
@@ -1075,22 +1164,90 @@ mod tests {
                 _ => ((i * 37 % 11) as f32 - 5.0) * 0.23,
             })
             .collect();
-        fold_matches_next_for::<NonZero>(&deltas);
-        fold_matches_next_for::<EvenOdd>(&deltas);
+        let runs: Vec<f32> = (0..48)
+            .map(|i| match i {
+                0..=2 | 7..=13 | 20 | 30..=40 => 0.0,
+                15 => -0.0,
+                _ => ((i * 37 % 11) as f32 - 5.0) * 0.23,
+            })
+            .collect();
+        for deltas in [&deltas, &runs] {
+            fold_matches_next_for::<NonZero>(deltas);
+            fold_matches_next_for::<EvenOdd>(deltas);
+        }
     }
 
     fn fold_matches_next_for<R: FillRule>(deltas: &[f32]) {
         for len in 0..=deltas.len() - 3 {
             let a = &deltas[..len + 3];
-            let by_next: Vec<u8> = iter::<R>(a, len).collect();
-            for taken in 0..=len.min(6) {
-                let mut it = iter::<R>(a, len);
-                let mut by_fold: Vec<u8> = it.by_ref().take(taken).collect();
-                by_fold = it.fold(by_fold, |mut v, c| {
-                    v.push(c);
-                    v
-                });
-                assert_eq!(by_fold, by_next, "len {len}, {taken} taken through next first");
+            for width in 1..=9 {
+                let by_next: Vec<u8> = iter::<R>(a, len, width).collect();
+                for taken in 0..=len.min(6) {
+                    let mut it = iter::<R>(a, len, width);
+                    let mut by_fold: Vec<u8> = it.by_ref().take(taken).collect();
+                    by_fold = it.fold(by_fold, |mut v, c| {
+                        v.push(c);
+                        v
+                    });
+                    assert_eq!(
+                        by_fold, by_next,
+                        "len {len}, width {width}, {taken} taken through next first"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `rows` against `next`: the same bytes inside each span, zero outside, rows in order, and
+    /// nothing before the first pixel not yet yielded.
+    #[test]
+    fn rows_match_next() {
+        let runs: Vec<f32> = (0..48)
+            .map(|i| match i {
+                0..=2 | 7..=13 | 20 | 30..=40 => 0.0,
+                15 => -0.0,
+                _ => ((i * 37 % 11) as f32 - 5.0) * 0.23,
+            })
+            .collect();
+        let offset: Vec<f32> = runs
+            .iter()
+            .map(|d| {
+                if *d == 0.0 {
+                    0.0
+                } else {
+                    d + 0.3
+                }
+            })
+            .collect();
+        for deltas in [&runs, &offset] {
+            rows_match_next_for::<NonZero>(deltas);
+            rows_match_next_for::<EvenOdd>(deltas);
+        }
+    }
+
+    fn rows_match_next_for<R: FillRule>(deltas: &[f32]) {
+        for width in 1..=9 {
+            for len in (0..=deltas.len() - 3).filter(|len| len % width == 0) {
+                let a = &deltas[..len + 3];
+                let by_next: Vec<u8> = iter::<R>(a, len, width).collect();
+                for taken in 0..=len.min(6) {
+                    let mut it = iter::<R>(a, len, width);
+                    it.by_ref().take(taken).for_each(drop);
+                    let mut got = vec![0u8; len];
+                    let mut last_y = None;
+                    it.rows(&mut [0; 16], |y, x, bytes| {
+                        assert!(last_y < Some(y), "rows out of order");
+                        last_y = Some(y);
+                        assert!(!bytes.is_empty() && x + bytes.len() <= width);
+                        assert!(y * width + x >= taken, "a span reaches back before pixel {taken}");
+                        got[y * width + x..][..bytes.len()].copy_from_slice(bytes);
+                    });
+                    assert_eq!(
+                        got[taken..],
+                        by_next[taken..],
+                        "len {len}, width {width}, {taken} taken first"
+                    );
+                }
             }
         }
     }
